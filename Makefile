@@ -107,15 +107,18 @@ deploy-nna-cifar10: nna-cifar10
 	$(UAI) push bin/nna_cifar10 /tmp/nna_cifar10 && $(UAI) exec "chmod +x /tmp/nna_cifar10"
 	@echo 'run: ./bin/uai exec "/tmp/nna_cifar10"'
 
-# Live camera -> NPU classifier: MPP capture (dlopen'd) + NVDLA CIFAR-10 in one process.
-# nna_cifar10.cpp is reused as a library here (-DNNACAM drops its main()).
+# Live camera + on-screen classifier: MPP capture (dlopen'd) + AWNN ResNet18 ImageNet-1000
+# (libmaix_nn.so, dlopen'd) in one process, inference on a background thread.
+# Needs -Wl,--export-dynamic for the retinaface back-ref stubs (see nncls).
 nnacam: bin/nnacam
-bin/nnacam: src/nnacam.cpp $(NPUDIR)/examples/cifar10/nna_cifar10.cpp $(NPUSRC) | bin
-	$(CROSSXX) $(CROSSFLAGS) -fpermissive -Wno-unused-but-set-variable -DNNACAM \
-	  $(MPPDEF) $(MPPINC) $(NPUINC) -o $@ $^ -ldl -lpthread
+bin/nnacam: src/nnacam.cpp | bin
+	$(CROSSXX) $(CROSSFLAGS) -fpermissive -Wno-unused-but-set-variable \
+	  $(MPPDEF) $(MPPINC) -Ivendor/libmaix -Wl,--export-dynamic -o $@ $< -ldl -lpthread -lm
 
 deploy-nnacam: nnacam
-	$(UAI) push bin/nnacam /tmp/nnacam && $(UAI) exec "chmod +x /tmp/nnacam"
+	$(UAI) push bin/nnacam /tmp/nnacam
+	$(UAI) push models/imagenet1000_labels.txt /tmp/imagenet1000_labels.txt
+	$(UAI) exec "chmod +x /tmp/nnacam"
 	@echo 'run: ./bin/uai exec "LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nnacam 320x240 60"'
 
 bin:

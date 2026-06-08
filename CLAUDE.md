@@ -250,26 +250,37 @@ facts learned by trial:
   licence in mind before folding it into a permissively-licensed publish. Open gap: no open
   compiler turns an arbitrary trained model into NVDLA descriptors (weights are hand-built /
   baked-in here).
-- `nnacam.cpp` — **live camera → NPU classification, on the LCD**. Combines the MPP NV21
-  capture (dlopen'd, same VI+ISP path as `cammpp.c`) with the NVDLA CIFAR-10 classifier in
-  **one process** and shows it all on the 240×240 panel: each frame is colour-corrected and
-  blitted to `/dev/fb0` (live preview, vsync-gated like `camcc.c`), centre-cropped +
-  downscaled to 32×32 for the NPU, and the predicted **label + score is drawn on the panel**
-  via a built-in 8×8 bitmap font (no text lib on the board). `make nnacam` /
-  `make deploy-nnacam`; run with `LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nnacam
-  [WxH] [nframes] [sat flip]` (nframes 0 = until SIGTERM). Proven: **MPP camera + NPU coexist
-  in ~60 MB**, ~30 fps. Key facts:
-  - **Colour: gray-world auto white balance**, not a fixed offset. The board ISP leaves a
-    strong green cast; a fixed `U/V` trim (as in `camcc`) *cannot* neutralise it (offsets only
-    shift R via V and B via U — they can't pull green down relative to luma, and a `V−` trim
-    crushes red → green-washed). `update_awb()` instead equalises the per-channel averages every
-    frame (gains `<<8`, clamped 0.4×–2.5×, EMA ~8-frame) so any cast self-corrects. Verified by
-    reading `/dev/fb0` back over serial: raw `B34/G53/R39` → fixed-offset `B52/G64/R11`
-    (green-washed) → **gray-world `B39/G41/R39` (neutral)**. The **same gains feed the NPU input**
-    so the classifier sees the same neutral colour it would have been trained on (a colour cast
-    measurably skews the prediction).
-  - The classifier reuse works because `nna_cifar10.cpp` exposes `nna_set_input_rgb()`/`nna_pred`/
-    `nna_scores`/`nna_label()` and `#ifndef NNACAM`-guards its `main()`. Debug colour/cast remotely
-    with the same fb0-readback one-liner used here (`dd if=/dev/fb0 … | hexdump … | awk` averages).
-  - Note CIFAR-10's 10 classes + dark scenes → meaningless labels; point a lit CIFAR-class
-    subject at the lens. (`camcc`'s fixed-offset colour would benefit from the same gray-world AWB.)
+- `nnacam.cpp` — **live camera → ImageNet classification, on the LCD**. Combines the MPP NV21
+  capture (dlopen'd, same VI+ISP path as `cammpp.c`) with a **ResNet18 ImageNet-1000 classifier**
+  run through the board's **AWNN** runtime (`libmaix_nn.so`, dlopen'd — same path as `nncls.c`),
+  all in one process on the 240×240 panel: each frame is gray-world colour-corrected and blitted
+  to `/dev/fb0` (live preview, vsync-gated like `camcc.c`), centre-cropped + scaled to 224×224 for
+  the net, and the predicted **label + softmax% is drawn on the panel** via a built-in 8×8 bitmap
+  font (no text lib on the board). `make nnacam` / `make deploy-nnacam`; run with
+  `LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nnacam [WxH] [nframes] [sat flip]`
+  (nframes 0 = until SIGTERM). Measured: **~21.8 MB peak RSS (`VmHWM`)**, preview ~25–30 fps.
+  Key facts:
+  - **Inference on a background thread.** ResNet18@224 is ~80 ms on the single A7; running it inline
+    would stall the preview. A worker thread classifies the *latest* frame (main hands it off via a
+    mutex+cond, non-blocking `trylock`, latest-wins) and the preview loop just draws the most recent
+    label → ~12 inf/s while the camera stays smooth. The worker copies the input under lock then runs
+    `forward()` lock-free so the main loop never blocks on it.
+  - **AWNN, on CPU here.** Model `/home/model/resnet18_1000_awnn.{param,bin}` (11.7 MB int8),
+    blobs `input0`/`output0`, input 224×224×3 HWC UINT8 `need_quantization=true`, `mean=127.5`
+    `norm=0.0078125`, output 1000 floats → CPU argmax+softmax. Runs on **CPU** because the NPU
+    driver is absent (see NPU row); loading `nna_sunxi.ko` moves it onto the NPU with no code change.
+    Needs `-Wl,--export-dynamic` for the retinaface back-ref stubs (same as `nncls`).
+  - **Labels**: `models/imagenet1000_labels.txt` (PyTorch/standard ImageNet order, matches the
+    model's training order — confirmed against libmaix `nn_resnet`'s baked list). **Pushed to
+    `/tmp`, not `/home/model`**: writing the labels to the rootfs came back as all-NUL despite uai's
+    md5 reporting OK (flaky rootfs storage — cf. the `/root` FSCK/FOUND.000 artifacts), so deploy
+    targets tmpfs and the content is verified directly, not just by the reported md5.
+  - **Colour: gray-world auto white balance** (`update_awb`), same approach as before — fixed `U/V`
+    offsets can't neutralise the ISP's green cast (offsets only shift R via V / B via U; a `V−` trim
+    crushes red → green-washed). Per-channel gains equalise the frame averages (gains `<<8`, clamped
+    0.4×–2.5×, EMA ~8-frame); the **same gains feed the 224×224 net input** so the classifier sees
+    the neutral colour it was trained on. Verify via the fb0-readback one-liner
+    (`dd if=/dev/fb0 … | hexdump … | awk` averages).
+  - ImageNet has 1000 fine-grained classes → point a well-lit, clear subject at the lens for
+    meaningful labels (dim/cluttered scenes give low-confidence guesses). The earlier NVDLA/CIFAR-10
+    version of nnacam is in git history; the NVDLA userspace path still ships as `make nna-cifar10`.
