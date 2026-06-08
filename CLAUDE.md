@@ -250,12 +250,26 @@ facts learned by trial:
   licence in mind before folding it into a permissively-licensed publish. Open gap: no open
   compiler turns an arbitrary trained model into NVDLA descriptors (weights are hand-built /
   baked-in here).
-- `nnacam.cpp` — **live camera → NPU classification**. Combines the MPP NV21 capture
-  (dlopen'd, same VI+ISP path as `cammpp.c`) with the NVDLA CIFAR-10 classifier in **one
-  process**: each frame is centre-cropped + downscaled to 32×32 RGB (BT.601) and classified
-  on the NPU; prints `label (score, margin)` per frame. `make nnacam` / `make deploy-nnacam`;
-  run with `LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nnacam [WxH] [nframes]`
-  (nframes 0 = until SIGTERM). Proven: **MPP camera + NPU coexist in ~60 MB**, ~30 fps. The
-  classifier reuse works because `nna_cifar10.cpp` exposes `nna_set_input_rgb()`/`nna_pred`/
-  `nna_scores`/`nna_label()` and `#ifndef NNACAM`-guards its `main()`. Note CIFAR-10's 10
-  classes + dark scenes → meaningless labels; point a lit CIFAR-class subject at the lens.
+- `nnacam.cpp` — **live camera → NPU classification, on the LCD**. Combines the MPP NV21
+  capture (dlopen'd, same VI+ISP path as `cammpp.c`) with the NVDLA CIFAR-10 classifier in
+  **one process** and shows it all on the 240×240 panel: each frame is colour-corrected and
+  blitted to `/dev/fb0` (live preview, vsync-gated like `camcc.c`), centre-cropped +
+  downscaled to 32×32 for the NPU, and the predicted **label + score is drawn on the panel**
+  via a built-in 8×8 bitmap font (no text lib on the board). `make nnacam` /
+  `make deploy-nnacam`; run with `LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nnacam
+  [WxH] [nframes] [sat flip]` (nframes 0 = until SIGTERM). Proven: **MPP camera + NPU coexist
+  in ~60 MB**, ~30 fps. Key facts:
+  - **Colour: gray-world auto white balance**, not a fixed offset. The board ISP leaves a
+    strong green cast; a fixed `U/V` trim (as in `camcc`) *cannot* neutralise it (offsets only
+    shift R via V and B via U — they can't pull green down relative to luma, and a `V−` trim
+    crushes red → green-washed). `update_awb()` instead equalises the per-channel averages every
+    frame (gains `<<8`, clamped 0.4×–2.5×, EMA ~8-frame) so any cast self-corrects. Verified by
+    reading `/dev/fb0` back over serial: raw `B34/G53/R39` → fixed-offset `B52/G64/R11`
+    (green-washed) → **gray-world `B39/G41/R39` (neutral)**. The **same gains feed the NPU input**
+    so the classifier sees the same neutral colour it would have been trained on (a colour cast
+    measurably skews the prediction).
+  - The classifier reuse works because `nna_cifar10.cpp` exposes `nna_set_input_rgb()`/`nna_pred`/
+    `nna_scores`/`nna_label()` and `#ifndef NNACAM`-guards its `main()`. Debug colour/cast remotely
+    with the same fb0-readback one-liner used here (`dd if=/dev/fb0 … | hexdump … | awk` averages).
+  - Note CIFAR-10's 10 classes + dark scenes → meaningless labels; point a lit CIFAR-class
+    subject at the lens. (`camcc`'s fixed-offset colour would benefit from the same gray-world AWB.)
