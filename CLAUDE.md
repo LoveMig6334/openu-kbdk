@@ -250,3 +250,12 @@ facts learned by trial:
   licence in mind before folding it into a permissively-licensed publish. Open gap: no open
   compiler turns an arbitrary trained model into NVDLA descriptors (weights are hand-built /
   baked-in here).
+- `nnacam.cpp` — **live camera → NPU classification**. Combines the MPP NV21 capture
+  (dlopen'd, same VI+ISP path as `cammpp.c`) with the NVDLA CIFAR-10 classifier in **one
+  process**: each frame is centre-cropped + downscaled to 32×32 RGB (BT.601) and classified
+  on the NPU; prints `label (score, margin)` per frame. `make nnacam` / `make deploy-nnacam`;
+  run with `LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nnacam [WxH] [nframes]`
+  (nframes 0 = until SIGTERM). Proven: **MPP camera + NPU coexist in ~60 MB**, ~30 fps. The
+  classifier reuse works because `nna_cifar10.cpp` exposes `nna_set_input_rgb()`/`nna_pred`/
+  `nna_scores`/`nna_label()` and `#ifndef NNACAM`-guards its `main()`. Note CIFAR-10's 10
+  classes + dark scenes → meaningless labels; point a lit CIFAR-class subject at the lens.
