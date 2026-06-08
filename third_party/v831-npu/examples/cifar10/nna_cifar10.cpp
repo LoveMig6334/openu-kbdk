@@ -141,6 +141,12 @@ static int preprocess_selftest(void) {
   memcpy(image_data, saved, sizeof(saved));     /* restore baked image */
   return ok;
 }
+/* Reusable hooks so other tools (e.g. nnacam) can drive the classifier:
+ * set the input from a 32x32x3 RGB buffer, run cifar10(), read nna_pred/nna_scores. */
+int nna_scores[10] = {0};
+int nna_pred = 0;
+void nna_set_input_rgb(const unsigned char *rgb) { fill_input_from_rgb(rgb); }
+
 /* load a raw 32x32x3 RGB file into image_data[]; 0 on success */
 static int load_rgb_file(const char *path) {
   unsigned char rgb[3 * 32 * 32];
@@ -172,6 +178,7 @@ static int16_t conv4_bias[10] = CONV4_BIAS;
 static int8_t scratch_buffer[65536];
 
 static char labels[][13] = {"airplane","automobile","bird","cat","deer","dog","frog","horse","ship","truck"};
+const char *nna_label(int i) { return (i >= 0 && i < 10) ? labels[i] : "?"; }
 
 /**
   * Signed Saturate
@@ -759,15 +766,21 @@ void cifar10() {
   int8_t bestv = scratch_buffer[20+0];
   for (int c=0;c<CONV4_OUT_CH;c++) {
        int8_t value = scratch_buffer[20+c];
-       printf("%-12s : %4d\n",labels[c],value);
+       nna_scores[c] = value;                 /* expose for reuse (nnacam) */
        if (value > bestv) { bestv = value; best = c; }
   }
+  nna_pred = best;
+#ifndef NNACAM
+  for (int c=0;c<CONV4_OUT_CH;c++)
+       printf("%-12s : %4d\n",labels[c],nna_scores[c]);
   printf("\npredicted: %s  (score %d)\n", labels[best], bestv);
+#endif
 
   sunxi_ion_alloc_free();
   sunxi_ion_alloc_close();
 }
 
+#ifndef NNACAM   /* nnacam links this file for the classifier but supplies its own main() */
 int main(int argc, char **argv) {
 
   const char *imgpath = (argc > 1) ? argv[1] : NULL;
@@ -800,3 +813,4 @@ int main(int argc, char **argv) {
   nna_off();
   return 0;
 }
+#endif /* NNACAM */
