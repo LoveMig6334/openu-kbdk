@@ -27,7 +27,7 @@ UAI := ./bin/uai
 
 .PHONY: all uai hello fbtest audio v4l2cap v4l2probe camdiag camread cammpp campreview camcc nncls clean \
         deploy deploy-fb deploy-audio deploy-cammpp deploy-preview preview-start preview-stop \
-        deploy-camcc camcc-start camcc-stop deploy-nncls monitor term
+        deploy-camcc camcc-start camcc-stop deploy-nncls nnaprobe deploy-nnaprobe monitor term
 all: uai hello fbtest audio
 
 uai: bin/uai
@@ -81,6 +81,15 @@ bin/camcc: src/camcc.c | bin
 nncls: bin/nncls
 bin/nncls: src/nncls.c | bin
 	$(CROSS) $(CROSSFLAGS) -Ivendor/libmaix -Wl,--export-dynamic -o $@ $< -ldl
+
+# NPU userspace bring-up: read-only probe of the NVDLA regs via /dev/mem (no driver)
+nnaprobe: bin/nnaprobe
+bin/nnaprobe: src/nnaprobe.c | bin
+	$(CROSS) $(CROSSFLAGS) -o $@ $<
+
+deploy-nnaprobe: nnaprobe
+	$(UAI) push bin/nnaprobe /tmp/nnaprobe && $(UAI) exec "chmod +x /tmp/nnaprobe"
+	@echo 'run: ./bin/uai exec "/tmp/nnaprobe"'
 
 bin:
 	mkdir -p bin
@@ -138,4 +147,4 @@ term: uai
 clean:
 	rm -f bin/uai bin/hello bin/fbtest bin/audio \
 	      bin/v4l2cap bin/v4l2probe bin/camdiag bin/camread bin/cammpp bin/campreview \
-	      bin/camcc bin/nncls
+	      bin/camcc bin/nncls bin/nnaprobe
