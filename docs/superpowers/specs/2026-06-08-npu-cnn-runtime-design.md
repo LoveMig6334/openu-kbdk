@@ -24,11 +24,11 @@ complete, working NN runtime already ships on the board:
 - **Ready-made int8 models already on the board:**
   | Path | Type | Input | Notes |
   | --- | --- | --- | --- |
-  | `/home/model/model_int8.{param,bin}` | classifier (ResNet-ish, 7×7/s2→64) | 224×224×3 | 5 MB, **labels unknown** (none on board) |
-  | `/home/model/yolo2_20class_awnn.{param,bin}` | YOLOv2 detector, VOC-20 | 224×224×3 | **known labels + working demo** at `/home/yolo2_20class_awnn.py` |
+  | `/home/model/face_recognize/fe_res18_117.{param,bin}` | ResNet18 face embedding (single-output) | in `inputs` 128×128×3 → out `FC_blob` 256-float | **M1 model** — clean single forward, no decoder |
+  | `/home/model/model_int8.{param,bin}` | **detector head**, not a plain classifier (multi-output: `output1` softmax + concat branches, `Conv 0=20`) | 224×224×3 | 5 MB; needs a decoder — *not* used for M1 |
+  | `/home/model/yolo2_20class_awnn.{param,bin}` | YOLOv2 detector, VOC-20 | 224×224×3 | **M2 model** — known labels + working demo at `/home/yolo2_20class_awnn.py` |
   | `/home/model/face/yolo2_face_awnn.*` | YOLOv2 face | 224×224×3 | demo at `/home/retinaface.py` |
   | `/home/model/awnn_yolo2_mask_int8.*` | YOLOv2 mask | 224×224×3 | 11.8 MB (largest — RAM risk) |
-  | `/home/model/face_recognize/fe_res18_117.*` | ResNet18 face embeddings | — | feature extractor |
 - **Inference conventions** (from the working `/home/yolo2_20class_awnn.py`):
   - Input **224×224×3, HWC, uint8 bytes**.
   - Preprocess `mean=[127.5,127.5,127.5]`, `norm=[0.0078125,…]` (i.e. `(x-127.5)/128`).
@@ -36,8 +36,8 @@ complete, working NN runtime already ships on the board:
     quantization internally from the `.param` scales; it returns a **float** output
     tensor.
   - The NPU runs only the conv backbone. **Decoders (YOLO anchors + NMS, softmax) run
-    on the CPU** in userspace. This is why a classifier (argmax only, no decoder) is the
-    simplest possible first test.
+    on the CPU** in userspace. This is why a single-output network (a feature embedding,
+    no decoder) is the simplest possible first test.
 
 ### Hardware constraints (re-confirmed live)
 - V831: single-core ARM Cortex-A7, armv7l hard-float NEON/VFPv4, Linux 4.9 musl/BusyBox.
@@ -87,20 +87,31 @@ Identical pattern to `cammpp.c`:
 ## Milestones
 
 ### Milestone 1 — `nncls`: prove the NPU on a static frame (no camera)
-- Input: a host-supplied **224×224×3 raw RGB** file, uploaded via `uai push`. This keeps
-  NPU bring-up **isolated from camera/ISP/RAM contention** — the cleanest possible test
-  of "does AWNN run from a plain headless C process."
-- Flow: `libmaix_nn_create` → load `/home/model/model_int8.{param,bin}` with config
-  `{input0:(224,224,3), mean:[127.5×3], norm:[0.0078125×3], model_type:"awnn"}` →
-  `forward(hwc uint8, quantize=true)` → softmax → print **top-5 `index:score`** +
-  measured inference latency (ms) + a `free`/RSS snapshot.
+- **Model: `fe_res18_117`** (face-embedding ResNet18). Chosen after inspecting the
+  on-board params: `model_int8` turned out to be a *detector head* (multiple outputs,
+  needs a decoder), whereas `fe_res18_117` is a clean **single-input → single-output**
+  network (input `inputs` 128×128×3 → output `FC_blob`, a 256-float embedding). That is
+  the simplest possible no-decoder NPU bring-up — exactly the intent of "classifier
+  first" — and it enables a *meaningful* check via the exported
+  `libmaix_nn_feature_compare_float`.
+- Input: two host-supplied **128×128×3 raw RGB** files, uploaded via `uai push`,
+  generated on the host from existing `captures/*.ppm` by a pure-stdlib resizer. This
+  keeps NPU bring-up **isolated from camera/ISP/RAM contention** — the cleanest possible
+  test of "does AWNN run from a plain headless C process."
+- Flow: `libmaix_nn_module_init` → `libmaix_nn_create` → `->init` → `->load`
+  (`{inputs:(128,128,3), output FC_blob, mean:[127.5×3], norm:[0.0078125×3]}`) →
+  build input layer (`dtype=UINT8, layout=HWC, need_quantization=true`) → `->forward`
+  → read 256-float output → print first few values, inference latency (ms), and a
+  `free`/RSS snapshot.
 - **Success criteria:**
   1. `forward` completes without SIGILL/SIGBUS/fault from a plain C process.
-  2. Output is **deterministic** for a fixed input image across runs.
-  3. Output **changes sensibly** across different input images (not constant).
-  4. Latency and peak RAM recorded.
-- Labels for `model_int8` are not on the board, so M1 reports raw indices — it is a
-  runtime/latency/RAM smoke test, **not** a labeled-accuracy demo.
+  2. Output is **bit-for-bit deterministic** for a fixed input across repeated runs.
+  3. Output **differs** between two different input images (not constant).
+  4. `feature_compare_float(out, out)` ≈ 1.0 and `compare(imgA, imgB)` < that — sanity
+     that the vector is a real embedding, not garbage.
+  5. Inference latency and peak RAM recorded.
+- This is a runtime/latency/RAM smoke test (no labels needed), proving the NPU path
+  works headless from plain C before any camera/screen wiring.
 
 ### Milestone 2 — `nndetect`: live labeled detection on the LCD
 - Model: `yolo2_20class_awnn` (VOC-20, has known labels + a reference Python demo to
@@ -121,8 +132,8 @@ Identical pattern to `cammpp.c`:
 
 ## RAM strategy (~60 MB total)
 - **Pure C, no Python/rpyc** — frees the most headroom vs. the MaixPy path.
-- **M1 runs with no camera/ISP** brought up: just the ~5 MB model + small activation
-  buffers (224×224×3 input ≈ 150 KB + a few MB of intermediates) → comfortable.
+- **M1 runs with no camera/ISP** brought up: just the ResNet18 model + small activation
+  buffers (128×128×3 input ≈ 48 KB + a few MB of intermediates) → comfortable.
 - **M2 adds MPP ISP+VI.** Start with small int8 models; avoid the 11.8 MB mask model
   until the budget is measured. Reuse a single fb page (no double-buffer growth).
 - Log `free` / RSS at each stage (after `create`, after `load`, after first `forward`)
