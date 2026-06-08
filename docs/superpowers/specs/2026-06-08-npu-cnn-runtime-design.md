@@ -110,8 +110,30 @@ Identical pattern to `cammpp.c`:
   4. `feature_compare_float(out, out)` ≈ 1.0 and `compare(imgA, imgB)` < that — sanity
      that the vector is a real embedding, not garbage.
   5. Inference latency and peak RAM recorded.
-- This is a runtime/latency/RAM smoke test (no labels needed), proving the NPU path
+- This is a runtime/latency/RAM smoke test (no labels needed), proving the NN path
   works headless from plain C before any camera/screen wiring.
+
+#### M1 measured results (2026-06-08, board firmware Linux 4.9.118 #3849 2024-06-18)
+**All success criteria PASS.** `nncls` loads `fe_res18_117` and runs forward from a plain
+C process:
+- **Latency:** ~31–32 ms/inference (avg of 10), single Cortex-A7.
+- **Peak RSS:** ~9.0 MB (8992–9032 kB) — comfortable in the ~60 MB budget.
+- **Determinism:** `featA[0..7]` byte-identical across separate process invocations.
+- **Variance / embedding sanity:** `compare(A,A)=100.0`, `compare(A,B)=87.3` (two similar
+  camera frames) — `feature_compare_float` returns a 0–100 similarity, 100 = identical.
+- **Two corrections vs the original plan:** (1) the input tensor is the *blob* name
+  `inputs_blob`, not the layer name `inputs` (the layer-name guess segfaulted in
+  `awnn_quantize`/`getTensorScale`); (2) `libmaix_nn.so` needs exported stubs for two
+  undefined retinaface decoder back-refs, and musl binds immediately (RTLD_LAZY is a
+  no-op) so they must resolve at load (`-Wl,--export-dynamic`).
+
+**Key finding — the NPU runs on CPU here, not silicon.** `open(/dev/nna)` fails
+(`nna_fd=-1`): this board image has **no NPU kernel driver** — no `nna`/`npu` `.ko` in
+`/lib/modules`, nothing in `/proc/devices`, no `/sys/class`, nothing in dmesg (consistent
+with the memory note that `import maix` crashes). AWNN tolerates this and falls back to
+**CPU int8 (NEON)** execution, so inference is fully functional but **not
+NPU-accelerated**. Enabling the ~0.2-TOPS NPU requires obtaining/loading the V831 `nna`
+kernel module (absent from this rootfs) — tracked as follow-on work, not an M1 blocker.
 
 ### Milestone 2 — `nndetect`: live labeled detection on the LCD
 - Model: `yolo2_20class_awnn` (VOC-20, has known labels + a reference Python demo to
