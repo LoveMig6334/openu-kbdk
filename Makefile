@@ -25,8 +25,9 @@ MPPDEF  := -DAWCHIP=0x1817
 
 UAI := ./bin/uai
 
-.PHONY: all uai hello fbtest audio v4l2cap v4l2probe camdiag camread cammpp campreview clean \
-        deploy deploy-fb deploy-audio deploy-cammpp deploy-preview preview-start preview-stop monitor term
+.PHONY: all uai hello fbtest audio v4l2cap v4l2probe camdiag camread cammpp campreview camcc nncls clean \
+        deploy deploy-fb deploy-audio deploy-cammpp deploy-preview preview-start preview-stop \
+        deploy-camcc camcc-start camcc-stop deploy-nncls monitor term
 all: uai hello fbtest audio
 
 uai: bin/uai
@@ -71,6 +72,16 @@ campreview: bin/campreview
 bin/campreview: src/campreview.c | bin
 	$(CROSS) $(CROSSFLAGS) $(MPPDEF) $(MPPINC) -o $@ $< -ldl -lpthread
 
+# Color-corrected live preview: MPP capture -> CPU white-balance/saturation -> fb0
+camcc: bin/camcc
+bin/camcc: src/camcc.c | bin
+	$(CROSS) $(CROSSFLAGS) $(MPPDEF) $(MPPINC) -o $@ $< -ldl -lpthread
+
+# NPU CNN inference: dlopen the board's libmaix_nn.so (AWNN), run forward
+nncls: bin/nncls
+bin/nncls: src/nncls.c | bin
+	$(CROSS) $(CROSSFLAGS) -Ivendor/libmaix -Wl,--export-dynamic -o $@ $< -ldl
+
 bin:
 	mkdir -p bin
 
@@ -101,6 +112,23 @@ preview-start: deploy-preview
 preview-stop:
 	$(UAI) exec "kill \$$(pidof campreview) 2>/dev/null; echo stopping"
 
+deploy-camcc: camcc
+	$(UAI) push bin/camcc /tmp/camcc && $(UAI) exec "chmod +x /tmp/camcc"
+	@echo 'start corrected preview: make camcc-start   |   stop: make camcc-stop'
+
+# Color-corrected live preview, detached (backgrounded in a subshell + log redirect
+# so MPP's verbose logs don't flood serial / break uai's exec marker).
+camcc-start: deploy-camcc
+	$(UAI) exec "(LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/camcc 320x240 0 9 -11 1.6 0 >/tmp/camcc.log 2>&1 &); echo started"
+	@echo 'corrected camera should be on the panel; stop with: make camcc-stop'
+
+camcc-stop:
+	$(UAI) exec "kill \$$(pidof camcc) 2>/dev/null; echo stopping"
+
+deploy-nncls: nncls
+	$(UAI) push bin/nncls /tmp/nncls && $(UAI) exec "chmod +x /tmp/nncls"
+	@echo 'run: ./bin/uai exec "LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nncls"'
+
 monitor: uai
 	$(UAI) monitor -t
 
@@ -109,4 +137,5 @@ term: uai
 
 clean:
 	rm -f bin/uai bin/hello bin/fbtest bin/audio \
-	      bin/v4l2cap bin/v4l2probe bin/camdiag bin/camread bin/cammpp bin/campreview
+	      bin/v4l2cap bin/v4l2probe bin/camdiag bin/camread bin/cammpp bin/campreview \
+	      bin/camcc bin/nncls
