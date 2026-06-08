@@ -67,10 +67,10 @@ Capability status against the goal (all "raw ioctl/mmap, no vendor lib" except w
 | Capability | Status | Path |
 | --- | --- | --- |
 | **Screen** (framebuffer) | ✅ done | `fbtest.c` — `FBIOGET_*` + mmap. Self-contained. |
-| **Camera** | ✅ live preview on panel | Standard V4L2 is unavailable here (`QBUF`/`DQBUF`/`QUERYBUF` ENOTTY — see `camdiag.c`); capture goes through Allwinner **MPP**. `cammpp.c` pulls NV21M frames (Y+VU phys/virt addrs, for processing); `campreview.c` shows the live camera on the 240×240 LCD via `AW_MPI_SYS_Bind(VI→VO)` (zero-copy hardware path). Both dlopen the board's `.so`; headers vendored under `vendor/eyesee-mpp/`. Color is ISP-3A-limited (mild green: converged chroma U≈V≈120 vs neutral 128; flat) — tuning is baked in `libisp.so`, improving it is a separate ISP-tuning task. |
+| **Camera** | ✅ live preview on panel (raw + colour-corrected) | Standard V4L2 is unavailable here (`QBUF`/`DQBUF`/`QUERYBUF` ENOTTY — see `camdiag.c`); capture goes through Allwinner **MPP**. `cammpp.c` pulls NV21M frames (Y+VU phys/virt addrs, for processing); `campreview.c` shows the live camera on the 240×240 LCD via `AW_MPI_SYS_Bind(VI→VO)` (zero-copy hardware path); `camcc.c` is the colour-corrected CPU-path preview (MPP capture → per-pixel white-balance/saturation → `/dev/fb0`). All dlopen the board's `.so`; headers vendored under `vendor/eyesee-mpp/`. Raw colour is ISP-3A-limited (green/flat: near-white pixels converge to **U≈119 / V≈139** vs neutral 128, saturation ≈16); the proper fix is baked in `libisp.so`, but `camcc` neutralises it in software (U+9 / V−11, sat×1.6 — see the `camcc.c` note below). |
 | **GPIO / I²C / SPI / buttons** | ✅ ready | UAPI headers present; same raw-ioctl approach. Not yet written. |
 | **Audio** | ✅ working | `audio.c` — raw `SNDRV_PCM_IOCTL_*` on `/dev/snd/pcmC0D0{p,c}`, no alsa-lib. `probe`/`tone`/`play`/`rec`, all verified on hardware. Codec: playback 1–2 ch, capture mono-only, S16_LE/S24_LE, 8k–192k Hz. |
-| **NPU** (the "µAI") | ❌ gap | Needs Allwinner's proprietary userspace runtime (libmaix / aw NPU blobs); no open headers/libs exist. Would require extracting the vendor `.so` from the board rootfs (Tina is musl, so they may link) and reverse-engineering the API. Research item, not a blocker for the rest. |
+| **NPU** (the "µAI") | ⚠️ CNN inference works **on CPU**; NPU silicon not driveable on this image | The CNN runtime is **not** a gap: the board ships `libmaix_nn.so` (the **AWNN** engine — a quantized-**ncnn** fork; models are `.param`+`.bin` with the `7767517` ncnn magic). `nncls.c` dlopen's it (no link, like `cammpp.c`), loads `fe_res18_117` (128×128×3 → 256-float embedding) and runs forward (~31 ms/inf). **But the NPU hardware has no driver on this rootfs**: `open(/dev/nna)` fails, no `nna`/`npu` `.ko` exists, nothing in `/proc/devices`. AWNN falls back to **CPU int8 (NEON)**, so inference is functional but not accelerated. Driving the ~0.2-TOPS NPU needs the V831 `nna` kernel module (absent here) — the real remaining research item. See `docs/superpowers/specs/2026-06-08-npu-cnn-runtime-design.md`. |
 
 **Portability gaps to fix before publishing** (currently macOS-host-specific):
 - The toolchain is the third-party Homebrew tap `messense/macos-cross-toolchains` — Linux
@@ -180,3 +180,55 @@ facts learned by trial:
   - MPP needs the on-board sensor/ISP config (present because the vendor stack uses it);
     `SYS_Init` also spins up cedarx/VO/ALSA (verbose logs) but, run directly like this,
     does **not** SIGILL the way MaixPy's Python init does.
+  - **Frame dump**: a 3rd arg (`cammpp WxH nframes DUMPFILE`) writes one well-exposed
+    converged frame as contiguous NV21 (Y then VU, **not** stride-packed — the planes
+    are contiguous and `mStride` here trips a bus error). The sensor emits occasional
+    all-black frames (avg Y≈0), so the dump skips frames whose sampled avg Y is outside
+    30..220 and overwrites, so the last good frame wins. Pull it host-side by gzipping on
+    the board and `hexdump`-ing in ≤18 KB chunks (one full-frame hex stream overruns
+    `uai exec`'s 15 s timeout); decode with `captures/nv21.py`.
+- `camcc.c` — **colour-corrected live preview** (the CPU alternative to `campreview`'s
+  zero-copy path). Captures NV21 via the same MPP VI+ISP sequence as `cammpp.c` (no VO),
+  converts to RGB with a white-balance + saturation correction, and blits to `/dev/fb0`.
+  Key facts learned building it:
+  - **fb0 stays visible without VO.** `campreview` has to *hide* the UI/fb layer
+    (`HLAY(2,0)`) to show its VO video layer; conversely, if you bring up **no** VO
+    layer, MPP leaves the fb/UI layer visible and plain `/dev/fb0` writes show through.
+  - **fb format**: 240×240, 24 bpp, `line_length=720`, byte order **B,G,R**
+    (blue.offset=0, green=8, red=16); virtual 240×480 = two pages.
+  - **No page-flipping.** Panning between the two virtual pages with `FBIOPAN_DISPLAY`
+    every frame switched the displayed page mid-scan → the image **tore and rolled down**.
+    Fix: pin `yoffset=0` and never pan; write each frame into that one page **after**
+    blocking on `FBIO_WAITFORVSYNC` (the sunxi-disp driver supports it; reported "vsync on").
+  - **Colour correction** (BT.601 full-range, saturation folded into the matrix coeffs,
+    fixed-point `<<8`): neutralise the illuminant `U += +9`, `V += −11`, then `chroma ×1.6`.
+    All of `uoff voff sat` plus a `flip` (180° rotate) are runtime args: `WxH secs uoff voff sat flip`.
+  - **Orientation**: the OV2685 raw output is already **upright** for how the board is
+    normally held → `flip=0` is the default (an earlier `flip=1` came from a mis-oriented
+    test capture and is wrong). ~30 fps; integer conversion keeps up on the single A7.
+  - **Verify colour/orientation remotely** by reading back the panel itself: while running,
+    `dd if=/dev/fb0 bs=720 count=240 | gzip`, pull chunked, and decode the BGR with the
+    same approach as `captures/nv21.py` (skip small/uniform grabs — they're black frames).
+- `nncls.c` — **CNN inference** via the board's `libmaix_nn.so` (AWNN). dlopen's the lib
+  (no link), loads `fe_res18_117` (128×128×3 → 256-float embedding), runs forward, and
+  checks determinism/variance with `libmaix_nn_feature_compare_float`. `make nncls`,
+  `make deploy-nncls`; run with `LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib`. Input is a
+  raw RGB888 file (`128*128*3` bytes); make one from a capture with `captures/ppm2raw.py`.
+  Build/run facts that bite:
+  - **Models are quantized ncnn** (`.param` text topology starting with `7767517` +
+    `.bin` int8 weights). Pass the **blob** name, not the layer name — for `fe_res18` the
+    input layer is `inputs` but its blob is `inputs_blob` (the layer-name guess segfaults
+    in `awnn_quantize`/`getTensorScale`). Output blob is `FC_blob`.
+  - **Preprocess** is HWC `uint8` with `mean=[127.5×3]`, `norm=[0.0078125×3]` and the
+    input layer's `need_quantization=true` (AWNN quantizes from the `.param` scales). The
+    NPU/engine runs the backbone; **decoders + argmax/softmax run on the CPU**.
+  - **musl binds immediately** (RTLD_LAZY is a no-op), and `libmaix_nn.so` carries two
+    undefined retinaface decoder back-refs (`retinaface_get_priorboxes`,
+    `retinaface_decode`). We never use that decoder, so export harmless stubs from the
+    binary via `-Wl,--export-dynamic` for the loader to bind.
+  - **Timing** uses `/proc/uptime` (averaged over N) to dodge the musl time64 trap that
+    hits `clock_gettime`/`gettimeofday`.
+  - **NPU vs CPU**: `open(/dev/nna)` fails because this rootfs has **no NPU driver**, so
+    AWNN runs on **CPU int8 (NEON)** — ~31 ms/inf, ~9 MB RSS for ResNet18@128². Driving
+    the actual NPU needs the V831 `nna` kernel module (not present). The next step (M2) is
+    live VOC-20 YOLOv2 on the LCD (camera→forward→CPU yolo2 decode→fb0).
