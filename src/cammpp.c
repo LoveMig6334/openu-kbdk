@@ -125,6 +125,7 @@ int main(int argc, char **argv){
     /* grab a stream so AE/AWB converge; report avg Y/U/V every ~15 frames so we
      * see the steady state the live preview actually shows (NV21 VU = V,U). */
     int nframes = (argc>2) ? atoi(argv[2]) : 90;
+    const char *dumpfile = (argc>3) ? argv[3] : NULL;  /* dump final NV21 frame here */
     for (int k=0; k<nframes; k++){
         VIDEO_FRAME_INFO_S fi; memset(&fi,0,sizeof fi);
         if (VI_GetFrame(dev, chn, &fi, 5000) != SUCCESS){ fprintf(stderr,"GetFrame: no frame\n"); goto stream_out; }
@@ -136,6 +137,27 @@ int main(int argc, char **argv){
             unsigned long sv=0,su=0,n=0; for (unsigned i=0;i+1<fw*fh/2;i+=2){ sv+=vu[i]; su+=vu[i+1]; n++; }
             printf("frame %2d: avg Y=%-3lu  U/Cb=%-3lu  V/Cr=%-3lu  (neutral 128)\n",
                    k, sy/(fw*fh), n?su/n:0, n?sv/n:0);
+        }
+        /* Write a contiguous NV21 file so the host can pull it back and inspect the
+         * real color. Sensor emits occasional black frames, so only dump well-exposed
+         * ones (sampled avg Y in 30..220) and overwrite -- the last good frame wins. */
+        int good = 0;
+        if (dumpfile && y){
+            unsigned fw=f->mWidth, fh=f->mHeight; unsigned long s=0,c=0;
+            for (unsigned i=0;i<fw*fh;i+=16){ s+=y[i]; c++; }
+            unsigned long ay = c?s/c:0; good = (ay>30 && ay<220);
+        }
+        if (dumpfile && good && y && vu){
+            unsigned fw=f->mWidth, fh=f->mHeight;
+            FILE *fp = fopen(dumpfile, "wb");
+            if (!fp){ perror("dump fopen"); }
+            else {
+                fwrite(y,  1, (size_t)fw*fh,   fp);   /* Y plane, contiguous */
+                fwrite(vu, 1, (size_t)fw*fh/2, fp);   /* VU plane (NV21), contiguous */
+                fclose(fp);
+                if (k%30==0 || k==nframes-1)
+                    printf("dumped NV21 %ux%u (%lu bytes) -> %s\n", fw,fh,(unsigned long)(fw*fh*3/2),dumpfile);
+            }
         }
         VI_ReleaseFrame(dev, chn, &fi);
         rc = 0;

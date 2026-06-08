@@ -1,3 +1,8 @@
 bin/
 *.o
 *.b64
+
+# Camera/NPU capture artifacts (large binaries: PPM/PNG/raw/hex/gz dumps).
+# Keep the host-side decode helpers (nv21.py, ppm2raw.py).
+captures/*
+!captures/*.py

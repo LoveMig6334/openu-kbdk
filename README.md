@@ -14,8 +14,9 @@ for building AIoT projects without the vendor library's limits.
 | --- | --- | --- |
 | **Screen** | `fbtest` | `/dev/fb0` (240×240 RGB888) via raw `ioctl`+`mmap` |
 | **Audio** | `audio` | raw `SNDRV_PCM_IOCTL_*` on `/dev/snd` — no alsa-lib (`probe`/`tone`/`play`/`rec`) |
-| **Camera capture** | `cammpp` | Allwinner **MPP** `AW_MPI_VI`+ISP → NV21M frame (standard V4L2 streaming is not exposed on this BSP) |
-| **Live camera preview** | `campreview` | `AW_MPI_SYS_Bind(VI→VO)` — camera straight to the LCD, zero-copy in hardware |
+| **Camera capture** | `cammpp` | Allwinner **MPP** `AW_MPI_VI`+ISP → NV21M frame (standard V4L2 streaming is not exposed on this BSP); optional raw-frame dump for host inspection |
+| **Live camera preview** | `campreview` | `AW_MPI_SYS_Bind(VI→VO)` — camera straight to the LCD, zero-copy in hardware (raw ISP colour) |
+| **Colour-corrected preview** | `camcc` | MPP capture → CPU white-balance + saturation → `/dev/fb0`; fixes the green/flat ISP colour, ~30 fps, vsync-synced |
 | GPIO / I²C / SPI | — | UAPI headers present; not yet written |
 | NPU | — | needs Allwinner's proprietary runtime; research item |
 
@@ -39,8 +40,10 @@ kidbright-uai/
 │   ├── audio.c                    # raw-ioctl ALSA: probe / tone / play / rec
 │   ├── v4l2probe.c  v4l2cap.c     # V4L2 recon (proved standard streaming is unavailable)
 │   ├── camdiag.c    camread.c     # V4L2 buffer-ABI + read() diagnostics
-│   ├── cammpp.c                   # MPP camera capture (one NV21M frame, for processing)
-│   └── campreview.c               # MPP live preview on the panel (VI→VO bind)
+│   ├── cammpp.c                   # MPP camera capture (one NV21M frame; can dump raw to a file)
+│   ├── campreview.c               # MPP live preview on the panel (VI→VO bind, raw colour)
+│   └── camcc.c                    # colour-corrected live preview (MPP capture → CPU WB/sat → fb0)
+├── captures/nv21.py               # host tool: decode dumped NV21 → PPM + colour stats (stdlib only)
 ├── vendor/eyesee-mpp/sun8iw19p1/  # vendored Allwinner MPP headers (V831 ABI) for the camera
 ├── scripts/serial_transfer_run.py # original pyserial transfer (reference/fallback)
 └── bin/                           # build output (gitignored)
@@ -59,7 +62,8 @@ brew install arm-unknown-linux-musleabihf
 make            # bin/uai (host) + bin/hello + bin/fbtest + bin/audio (board)
 make uai        # just the host serial tool
 make fbtest     # screen test    | make audio  # audio tool
-make cammpp     # camera capture | make campreview  # live preview
+make cammpp     # camera capture | make campreview  # live preview (raw colour)
+make camcc      # colour-corrected live preview
 make clean
 ```
 
@@ -114,9 +118,36 @@ through Allwinner's **MPP** middleware instead (`AW_MPI_VI`/ISP/VO). The vendore
 make deploy-cammpp
 ./bin/uai exec "LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/cammpp 320x240"
 
-# live camera preview on the 240x240 panel (VI->VO hardware bind)
+# live camera preview on the 240x240 panel (VI->VO hardware bind, raw ISP colour)
 make preview-start                        # camera goes live, stays until stopped
 make preview-stop                         # clean shutdown + unblank the panel
+```
+
+### Colour-corrected preview (`camcc`)
+The hardware VI→VO path is zero-copy but shows the raw ISP colour, which on this
+board is green/grey and washed out (neutrals land at **U≈119 / V≈139** instead of
+128/128; saturation ≈16). `camcc` takes the CPU path instead — captures NV21 via
+MPP, applies a white-balance + saturation correction per pixel, and blits BGR to
+`/dev/fb0`. It brings up **no VO video layer**, so the fb/UI layer stays visible and
+the writes show through; each frame is written into a single fixed page gated on
+`FBIO_WAITFORVSYNC`, so the image is steady (no tearing/roll). ~30 fps on the single A7.
+
+```sh
+make camcc-start                          # corrected camera live, until stopped
+make camcc-stop
+```
+Correction is tunable live without recompiling — args are `WxH secs uoff voff sat flip`:
+```sh
+# defaults: uoff=+9 voff=-11 sat=1.6 flip=0 (raw sensor orientation is upright)
+./bin/uai exec "(LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/camcc 320x240 0 9 -11 2.0 0 &); echo ok"
+```
+The defaults came from host-side analysis: dump a raw frame, pull it over serial,
+and measure it with `captures/nv21.py` (pure stdlib; NV21→PPM + colour stats):
+```sh
+# on the board: dump one converged NV21 frame, gzip it
+./bin/uai exec "LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/cammpp 320x240 90 /tmp/f.nv21; gzip -f /tmp/f.nv21"
+# pull it (chunked hexdump keeps each exec under uai's 15s timeout), then:
+python3 captures/nv21.py f.nv21.gz out.ppm 320 240 9 -11 1.6   # uoff voff sat
 ```
 
 ## Notes / limitations
@@ -126,7 +157,8 @@ make preview-stop                         # clean shutdown + unblank the panel
   and prefer `poll` over `select`.
 - **Camera needs the vendor MPP libs** (`libmedia_mpp`/`libmpp_vi`/`libmpp_isp`/
   `libmpp_vo`), which are on the board; we `dlopen` them rather than link. Camera
-  *colour* is ISP-3A-limited (mildly green/flat) — the tuning lives in `libisp.so`.
+  *colour* is ISP-3A-limited (mildly green/flat) — the proper fix lives in `libisp.so`,
+  but `camcc` corrects it cheaply in software (white-balance + saturation on the CPU).
 - **Display restore:** fully shutting MPP down (`SYS_Exit`) resets the display
   engine; the preview unblanks `/dev/fb0` on exit, but a clean console may need a
   reboot (the vendor's own sample has the same property).
