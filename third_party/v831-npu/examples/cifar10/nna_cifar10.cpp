@@ -106,6 +106,57 @@ static void* gp_paddr;
 
 static int8_t image_data[8 * 32 * 32] = IMG_DATA;
 
+/* ---------------------------------------------------------------------------
+ * Local modification (KidBright uAI toolkit): classify an arbitrary 32x32 RGB
+ * image file, not just the baked-in reference. Reproduces the documented CIFAR-10
+ * preprocessing (subtract mean {125,123,114}, scale ((v<<7)+127)>>8) and the NVDLA
+ * 8-channel-padded HWC input layout, writing straight into image_data[].
+ * ------------------------------------------------------------------------- */
+static const unsigned char img_rgb_ref[3 * 32 * 32] = IMG_DATA_RGB;
+static const int img_mean[3] = {125, 123, 114};   /* R,G,B (per header note) */
+
+static int8_t pp_chan(int px, int mean) {
+  /* scale ((v<<7)+128)>>8 == round-half-up(v/2). The header comment says +127,
+   * but the baked IMG_DATA was generated with +128 (verified byte-exact). */
+  int v = (((px - mean) << 7) + 128) >> 8;
+  if (v > 127)  v = 127;
+  if (v < -128) v = -128;
+  return (int8_t)v;
+}
+/* fill image_data[] (NVDLA 8-ch-padded HWC) from 32x32x3 interleaved RGB */
+static void fill_input_from_rgb(const unsigned char *rgb) {
+  for (int p = 0; p < 32 * 32; p++) {
+    image_data[p*8 + 0] = pp_chan(rgb[p*3 + 0], img_mean[0]);
+    image_data[p*8 + 1] = pp_chan(rgb[p*3 + 1], img_mean[1]);
+    image_data[p*8 + 2] = pp_chan(rgb[p*3 + 2], img_mean[2]);
+    for (int c = 3; c < 8; c++) image_data[p*8 + c] = 0;
+  }
+}
+/* prove our preprocessing reproduces the baked-in image_data byte-for-byte */
+static int preprocess_selftest(void) {
+  int8_t saved[8 * 32 * 32];
+  memcpy(saved, image_data, sizeof(saved));
+  fill_input_from_rgb(img_rgb_ref);
+  int ok = (memcmp(saved, image_data, sizeof(saved)) == 0);
+  memcpy(image_data, saved, sizeof(saved));     /* restore baked image */
+  return ok;
+}
+/* load a raw 32x32x3 RGB file into image_data[]; 0 on success */
+static int load_rgb_file(const char *path) {
+  unsigned char rgb[3 * 32 * 32];
+  FILE *f = fopen(path, "rb");
+  if (!f) { perror(path); return -1; }
+  size_t n = fread(rgb, 1, sizeof(rgb), f);
+  fclose(f);
+  if (n != sizeof(rgb)) {
+    fprintf(stderr, "%s: got %zu bytes, need %zu (32x32x3 raw RGB)\n",
+            path, n, sizeof(rgb));
+    return -1;
+  }
+  fill_input_from_rgb(rgb);
+  return 0;
+}
+
 static int8_t conv1_nhwc_wt[3 * 5 * 5 * 32] = CONV1_WT;
 static int16_t conv1_bias[32] = CONV1_BIAS;
 
@@ -704,17 +755,33 @@ void cifar10() {
   memset((int8_t*)scratch_buffer+20,0,CONV4_OUT_DIM*CONV4_OUT_DIM*CONV4_OUT_CH);
   softmax_q7((int8_t*)scratch_buffer,CONV4_OUT_DIM*CONV4_OUT_DIM*CONV4_OUT_CH,(int8_t*)scratch_buffer+20);
 
-  for (int c=1;c<CONV4_OUT_CH;c++) {
+  int best = 0;
+  int8_t bestv = scratch_buffer[20+0];
+  for (int c=0;c<CONV4_OUT_CH;c++) {
        int8_t value = scratch_buffer[20+c];
        printf("%-12s : %4d\n",labels[c],value);
+       if (value > bestv) { bestv = value; best = c; }
   }
-  printf("\n");
+  printf("\npredicted: %s  (score %d)\n", labels[best], bestv);
 
   sunxi_ion_alloc_free();
   sunxi_ion_alloc_close();
 }
 
 int main(int argc, char **argv) {
+
+  const char *imgpath = (argc > 1) ? argv[1] : NULL;
+
+  // Prove our preprocessing matches the baked-in reference exactly.
+  printf("preprocess self-test: %s\n", preprocess_selftest() ? "PASS" : "FAIL");
+
+  if (imgpath) {
+    if (load_rgb_file(imgpath)) return 1;   // overwrites image_data[]
+    printf("classifying: %s\n", imgpath);
+  } else {
+    printf("classifying: built-in reference image "
+           "(pass a 32x32x3 raw RGB file to classify your own)\n");
+  }
 
   // Set clock to 400Mhz (DDR2 memory speed ??)
   nna_configure(nna_cmd_clk, 400);
@@ -731,5 +798,5 @@ int main(int argc, char **argv) {
   }
 
   nna_off();
-
+  return 0;
 }
