@@ -91,6 +91,21 @@ deploy-nnaprobe: nnaprobe
 	$(UAI) push bin/nnaprobe /tmp/nnaprobe && $(UAI) exec "chmod +x /tmp/nnaprobe"
 	@echo 'run: ./bin/uai exec "/tmp/nnaprobe"'
 
+# NPU CIFAR-10 demo on the NVDLA core, built from the vendored GPLv3 mtx512/v831-npu
+# (third_party/v831-npu). Drives the NPU via /dev/mem + /dev/ion + /dev/cedar_dev.
+CROSSXX  ?= arm-unknown-linux-musleabihf-g++
+NPUDIR   := third_party/v831-npu
+NPUSRC   := $(wildcard $(NPUDIR)/hw/*.cpp $(NPUDIR)/utils/*.cpp)
+NPUINC   := -I$(NPUDIR)/hw/include -I$(NPUDIR)/utils/include -I$(NPUDIR)/examples/cifar10/include
+
+nna-cifar10: bin/nna_cifar10
+bin/nna_cifar10: $(NPUDIR)/examples/cifar10/nna_cifar10.cpp $(NPUSRC) | bin
+	$(CROSSXX) $(CROSSFLAGS) -fpermissive -Wno-unused-but-set-variable $(NPUINC) -o $@ $^ -lpthread
+
+deploy-nna-cifar10: nna-cifar10
+	$(UAI) push bin/nna_cifar10 /tmp/nna_cifar10 && $(UAI) exec "chmod +x /tmp/nna_cifar10"
+	@echo 'run: ./bin/uai exec "/tmp/nna_cifar10"'
+
 bin:
 	mkdir -p bin
 
