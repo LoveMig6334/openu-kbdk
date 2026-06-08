@@ -70,7 +70,7 @@ Capability status against the goal (all "raw ioctl/mmap, no vendor lib" except w
 | **Camera** | ✅ live preview on panel (raw + colour-corrected) | Standard V4L2 is unavailable here (`QBUF`/`DQBUF`/`QUERYBUF` ENOTTY — see `camdiag.c`); capture goes through Allwinner **MPP**. `cammpp.c` pulls NV21M frames (Y+VU phys/virt addrs, for processing); `campreview.c` shows the live camera on the 240×240 LCD via `AW_MPI_SYS_Bind(VI→VO)` (zero-copy hardware path); `camcc.c` is the colour-corrected CPU-path preview (MPP capture → per-pixel white-balance/saturation → `/dev/fb0`). All dlopen the board's `.so`; headers vendored under `vendor/eyesee-mpp/`. Raw colour is ISP-3A-limited (green/flat: near-white pixels converge to **U≈119 / V≈139** vs neutral 128, saturation ≈16); the proper fix is baked in `libisp.so`, but `camcc` neutralises it in software (U+9 / V−11, sat×1.6 — see the `camcc.c` note below). |
 | **GPIO / I²C / SPI / buttons** | ✅ ready | UAPI headers present; same raw-ioctl approach. Not yet written. |
 | **Audio** | ✅ working | `audio.c` — raw `SNDRV_PCM_IOCTL_*` on `/dev/snd/pcmC0D0{p,c}`, no alsa-lib. `probe`/`tone`/`play`/`rec`, all verified on hardware. Codec: playback 1–2 ch, capture mono-only, S16_LE/S24_LE, 8k–192k Hz. |
-| **NPU** (the "µAI") | ⚠️ CNN inference works **on CPU**; NPU silicon not driveable on this image | The CNN runtime is **not** a gap: the board ships `libmaix_nn.so` (the **AWNN** engine — a quantized-**ncnn** fork; models are `.param`+`.bin` with the `7767517` ncnn magic). `nncls.c` dlopen's it (no link, like `cammpp.c`), loads `fe_res18_117` (128×128×3 → 256-float embedding) and runs forward (~31 ms/inf). **But the NPU hardware has no driver on this rootfs**: `open(/dev/nna)` fails, no `nna`/`npu` `.ko` exists, nothing in `/proc/devices`. AWNN falls back to **CPU int8 (NEON)**, so inference is functional but not accelerated. Driving the ~0.2-TOPS NPU needs the V831 `nna` kernel module (absent here) — the real remaining research item. See `docs/superpowers/specs/2026-06-08-npu-cnn-runtime-design.md`. |
+| **NPU** (the "µAI") | ✅ CNN inference runs **on the NPU** from userspace (no kernel driver) | The V831 NPU is a customised **NVIDIA NVDLA `nv_small`** core. **Two working paths.** (1) *CPU/AWNN*: the board ships `libmaix_nn.so` (AWNN, a quantized-**ncnn** fork; `.param`+`.bin`, `7767517` magic); `nncls.c` dlopen's it and runs `fe_res18` (~31 ms/inf) — but it `open(/dev/nna)`-fails and falls back to **CPU** because this rootfs's kernel was built **without `CONFIG_SUNXI_NNA`** (no `nna_sunxi.ko`; DT node `nna@02400000` *is* present + `okay`). (2) *NPU/userspace*: drive the NVDLA core directly via `/dev/mem` (regs `0x2400000`, CCU `0x3001000`) + `/dev/ion` + `/dev/cedar_dev` — **no kernel module needed**. `make nnaprobe` proves the regs respond; `make nna-cifar10` runs a 4-conv CNN on the NPU (classifies the test image "ship : 127", verified). Built from vendored **GPLv3** `third_party/v831-npu/` (mtx512). See `docs/superpowers/specs/2026-06-08-npu-cnn-runtime-design.md`. |
 
 **Portability gaps to fix before publishing** (currently macOS-host-specific):
 - The toolchain is the third-party Homebrew tap `messense/macos-cross-toolchains` — Linux
@@ -228,7 +228,25 @@ facts learned by trial:
     binary via `-Wl,--export-dynamic` for the loader to bind.
   - **Timing** uses `/proc/uptime` (averaged over N) to dodge the musl time64 trap that
     hits `clock_gettime`/`gettimeofday`.
-  - **NPU vs CPU**: `open(/dev/nna)` fails because this rootfs has **no NPU driver**, so
-    AWNN runs on **CPU int8 (NEON)** — ~31 ms/inf, ~9 MB RSS for ResNet18@128². Driving
-    the actual NPU needs the V831 `nna` kernel module (not present). The next step (M2) is
-    live VOC-20 YOLOv2 on the LCD (camera→forward→CPU yolo2 decode→fb0).
+  - **NPU vs CPU**: `nncls`/AWNN runs on **CPU int8 (NEON)** — ~31 ms/inf, ~9 MB RSS for
+    ResNet18@128² — because `open(/dev/nna)` fails (kernel built without `CONFIG_SUNXI_NNA`).
+    The **NPU itself works via the userspace path below**; AWNN just can't reach it without
+    its driver.
+- `nnaprobe.c` — **read-only NPU bring-up probe** (clean-room, no driver). Maps `/dev/mem`,
+  runs the documented CCU NNA clock/power sequence (`ccu[440]`=clk-select, `ccu[443]`=gate,
+  base `0x03001000`), maps the NVDLA register window (`0x02400000`), and reads its config
+  regs (SIGBUS-guarded so a wrong clock reports instead of hanging). Confirmed the regs are
+  live (the DT's `assigned-clocks` power the NNA at boot). `make nnaprobe` / `make deploy-nnaprobe`.
+- **`third_party/v831-npu/`** (GPLv3, mtx512) + `nna-cifar10` — **CNN inference on the NPU
+  with no kernel driver**. The V831 NPU is an **NVIDIA NVDLA `nv_small`** core; this code
+  drives it directly from userspace via `/dev/mem` (regs `0x2400000` + CCU `0x3001000`) +
+  `/dev/ion` + `/dev/cedar_dev` (`AW_MEM_GET_IOMMU_ADDR` for the IOMMU/phys addr the NVDLA
+  needs; cache flush via `ION_IOC_SUNXI_FLUSH_RANGE`). `make nna-cifar10` /
+  `make deploy-nna-cifar10` cross-build the CIFAR-10 example for musl-armhf and it runs on
+  the NPU (classifies the test image "ship : 127", verified). **No `LD_LIBRARY_PATH`**, no
+  vendor `.so`. Gotchas: needs root (`/dev/mem`); buffers are cached so flush around every
+  CPU↔buffer copy; all NPU address fields take the **physical/IOMMU** address from cedar,
+  not the mmap'd virtual one. Note this is **GPLv3** (isolated in `third_party/`) — keep the
+  licence in mind before folding it into a permissively-licensed publish. Open gap: no open
+  compiler turns an arbitrary trained model into NVDLA descriptors (weights are hand-built /
+  baked-in here).
