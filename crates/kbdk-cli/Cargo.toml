@@ -1,0 +1,15 @@
+[package]
+name = "kbdk-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kbdk"
+path = "src/main.rs"
+
+[dependencies]
+kbdk-core = { path = "../kbdk-core" }
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true

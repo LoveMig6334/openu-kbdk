@@ -6,3 +6,4 @@ bin/
 # Keep the host-side decode helpers (nv21.py, ppm2raw.py).
 captures/*
 !captures/*.py
+target/
