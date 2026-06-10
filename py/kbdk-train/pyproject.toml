@@ -1,0 +1,16 @@
+[project]
+name = "kbdk-train"
+version = "0.1.0"
+description = "Fine-tune torchvision backbones on ImageFolder datasets (MPS), export TorchScript"
+requires-python = ">=3.12"
+dependencies = ["torch>=2.4", "torchvision", "pillow"]
+
+[project.scripts]
+kbdk-train = "kbdk_train.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kbdk_train"]

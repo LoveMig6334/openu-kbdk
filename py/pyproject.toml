@@ -1,0 +1,17 @@
+[project]
+name = "kbdk-py"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["kbdk-train", "kbdk-convert"]
+
+[tool.uv.sources]
+kbdk-train = { workspace = true }
+kbdk-convert = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
