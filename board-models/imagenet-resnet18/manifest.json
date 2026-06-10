@@ -1,0 +1,21 @@
+{
+  "name": "imagenet-resnet18",
+  "task": "classification",
+  "backbone": "resnet18",
+  "input": {
+    "width": 224,
+    "height": 224,
+    "mean": [127.5, 127.5, 127.5],
+    "norm": [0.0078125, 0.0078125, 0.0078125]
+  },
+  "quant": "int8",
+  "runtime": "awnn",
+  "blobs": { "in_blob": "input0", "out_blob": "output0" },
+  "files": {
+    "param": "/home/model/resnet18_1000_awnn.param",
+    "bin": "/home/model/resnet18_1000_awnn.bin",
+    "labels_file": "labels.txt"
+  },
+  "md5": {},
+  "labels": []
+}

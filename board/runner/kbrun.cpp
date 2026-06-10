@@ -71,6 +71,19 @@ extern "C" int getentropy(void *buf, size_t len){
 #include "media/mm_comm_video.h"
 #include "media/mm_comm_vi.h"
 
+/* AWNN engine (the board's vendor runtime) for the stock /home/model/* packs —
+ * vanilla ncnn can't run those (proprietary quantize keys) and AWNN can't run
+ * ours; the manifest's "runtime" field picks the engine. dlopen'd lazily so
+ * ncnn packs need none of the vendor stack. Same wiring as src/nnacam.cpp. */
+extern "C" {
+#include "libmaix_nn.h"
+/* libmaix_nn.so has undefined back-refs to retinaface decoder hooks (normally in
+ * the python ext); musl binds immediately, so export stubs (-Wl,--export-dynamic). */
+void retinaface_get_priorboxes(void){}
+void retinaface_decode(void){}
+}
+#define NN_SO "/usr/lib/python3.8/site-packages/maix/libmaix_nn.so"
+
 /* ---- wall clock without any time64-redirected libc call (musl 1.1.16 board) -- */
 static double now_ms(void){
     FILE *f = fopen("/proc/uptime", "r");
@@ -261,13 +274,83 @@ static void nv21_to_rgb_in(const uint8_t *Y, const uint8_t *VU, int W, int H,
 /* ---- shared classifier state -------------------------------------------------- */
 static KbManifest g_m;
 static ncnn::Net g_net;
+static bool g_awnn_engine = false;
+static libmaix_nn_t *g_awnn = NULL;
+static unsigned char *g_awnn_qbuf = NULL;
+static float *g_awnn_out = NULL;
+static int g_nclass = 0;
 
-/* run one ncnn forward on interleaved RGB (in_w*in_h*3), return softmax probs */
+/* manifest model paths may be absolute (stock board models) or pack-relative */
+static std::string model_path(const std::string& dir, const std::string& p){
+    return p.size() && p[0] == '/' ? p : dir + "/" + p;
+}
+
+static bool awnn_init(const std::string& dir){
+    typedef libmaix_err_t (*fn_module_init)(void);
+    typedef libmaix_nn_t* (*fn_create)(void);
+    if(!dlopen(NN_SO, RTLD_NOW|RTLD_GLOBAL)){
+        fprintf(stderr, "dlopen %s: %s\n", NN_SO, dlerror()); return false;
+    }
+    fn_module_init nn_module_init; fn_create nn_create;
+    #define SYM(v,name) do{ *(void**)(&v)=aw_dlsym(RTLD_DEFAULT,name); \
+        if(!v){ fprintf(stderr,"dlsym %s failed\n",name); return false; } }while(0)
+    SYM(nn_module_init, "libmaix_nn_module_init");
+    SYM(nn_create,      "libmaix_nn_create");
+    #undef SYM
+    if(nn_module_init() != LIBMAIX_ERR_NONE) return false;
+    g_awnn = nn_create();
+    if(!g_awnn || g_awnn->init(g_awnn) != LIBMAIX_ERR_NONE) return false;
+
+    static std::string param = model_path(dir, g_m.param);
+    static std::string bin   = model_path(dir, g_m.bin);
+    static char *in_names[2]  = { (char*)g_m.in_blob.c_str(),  NULL };
+    static char *out_names[2] = { (char*)g_m.out_blob.c_str(), NULL };
+    libmaix_nn_model_path_t mp; memset(&mp, 0, sizeof mp);
+    mp.awnn.param_path = (char*)param.c_str();
+    mp.awnn.bin_path   = (char*)bin.c_str();
+    libmaix_nn_opt_param_t opt; memset(&opt, 0, sizeof opt);
+    opt.awnn.input_names = in_names; opt.awnn.output_names = out_names;
+    opt.awnn.input_num = 1; opt.awnn.output_num = 1;
+    for(int i = 0; i < 3; i++){ opt.awnn.mean[i] = g_m.mean[i]; }
+    /* AWNN's norm is the raw scale; the manifest's norm already is too */
+    for(int i = 0; i < 3; i++){ opt.awnn.norm[i] = g_m.norm[i]; }
+    opt.awnn.encrypt = false;
+    if(g_awnn->load(g_awnn, &mp, &opt) != LIBMAIX_ERR_NONE){
+        fprintf(stderr, "awnn load failed (%s)\n", param.c_str()); return false;
+    }
+    g_awnn_qbuf = (unsigned char*)malloc((size_t)g_m.w * g_m.h * 3);
+    g_awnn_out  = (float*)malloc(sizeof(float) * g_nclass);
+    return true;
+}
+
+static void softmax_in_place(std::vector<float>& v){
+    float mx = *std::max_element(v.begin(), v.end()); float sum = 0;
+    for(auto& x : v){ x = expf(x - mx); sum += x; }
+    for(auto& x : v) x /= sum;
+}
+
+/* run one forward on interleaved RGB (in_w*in_h*3), return softmax probs */
 static bool classify(const unsigned char *rgb, std::vector<float>& probs, double *ms){
+    double t0 = now_ms();
+    if(g_awnn_engine){
+        libmaix_nn_layer_t in; memset(&in, 0, sizeof in);
+        in.w = g_m.w; in.h = g_m.h; in.c = 3;
+        in.dtype = LIBMAIX_NN_DTYPE_UINT8; in.layout = LIBMAIX_NN_LAYOUT_HWC;
+        in.need_quantization = true;
+        in.data = (void*)rgb; in.buff_quantization = g_awnn_qbuf;
+        libmaix_nn_layer_t o; memset(&o, 0, sizeof o);
+        o.w = 1; o.h = 1; o.c = g_nclass;
+        o.dtype = LIBMAIX_NN_DTYPE_FLOAT; o.layout = LIBMAIX_NN_LAYOUT_HWC;
+        o.data = g_awnn_out;
+        if(g_awnn->forward(g_awnn, &in, &o) != LIBMAIX_ERR_NONE) return false;
+        if(ms) *ms = now_ms() - t0;
+        probs.assign(g_awnn_out, g_awnn_out + g_nclass);
+        softmax_in_place(probs);
+        return true;
+    }
     ncnn::Mat in = ncnn::Mat::from_pixels(rgb, ncnn::Mat::PIXEL_RGB, g_m.w, g_m.h);
     in.substract_mean_normalize(g_m.mean, g_m.norm);
     ncnn::Mat out;
-    double t0 = now_ms();
     ncnn::Extractor ex = g_net.create_extractor();
     ex.input(g_m.in_blob.c_str(), in);
     if(ex.extract(g_m.out_blob.c_str(), out)) return false;
@@ -275,9 +358,7 @@ static bool classify(const unsigned char *rgb, std::vector<float>& probs, double
     probs.resize(out.c > 1 ? out.c : out.w);
     if(out.c > 1) for(int i = 0; i < out.c; i++) probs[i] = out.channel(i)[0];
     else for(int i = 0; i < out.w; i++) probs[i] = ((const float*)out)[i];
-    float mx = *std::max_element(probs.begin(), probs.end()); float sum = 0;
-    for(auto& x : probs){ x = expf(x - mx); sum += x; }
-    for(auto& x : probs) x /= sum;
+    softmax_in_place(probs);
     return true;
 }
 
@@ -350,7 +431,10 @@ static int run_image_mode(const std::string& dir, const char *img_path){
     }
     (void)dir;
     print_result_json(probs, ms);
-    return 0;
+    /* skip libc atexit teardown: AWNN's exit handlers segfault in ion frees
+     * (phy2vir spam) once a model was loaded; our output is already flushed */
+    fflush(NULL);
+    _exit(0);
 }
 
 int main(int argc, char **argv){
@@ -382,13 +466,39 @@ int main(int argc, char **argv){
     if(!mf_load((dir + "/manifest.json").c_str(), g_m)){
         printf("{\"event\":\"error\",\"msg\":\"manifest load failed\"}\n"); return 1;
     }
-    g_net.opt.num_threads = 1;
-    if(g_net.load_param((dir + "/" + g_m.param).c_str()) ||
-       g_net.load_model((dir + "/" + g_m.bin).c_str())){
-        printf("{\"event\":\"error\",\"msg\":\"model load failed\"}\n"); return 1;
+    /* labels: inline JSON array, or one-per-line labels_file (1000 ImageNet
+     * labels don't belong inline) */
+    if(g_m.labels.empty() && !g_m.labels_file.empty()){
+        FILE *lf = fopen(model_path(dir, g_m.labels_file).c_str(), "r");
+        char line[160];
+        while(lf && fgets(line, sizeof line, lf)){
+            size_t n = strlen(line);
+            while(n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
+            if(n) g_m.labels.push_back(line);
+        }
+        if(lf) fclose(lf);
     }
-    printf("{\"event\":\"loaded\",\"name\":\"%s\",\"input\":\"%dx%d\",\"classes\":%zu}\n",
-           g_m.name.c_str(), g_m.w, g_m.h, g_m.labels.size());
+    g_nclass = (int)g_m.labels.size();
+
+    g_awnn_engine = (g_m.runtime == "awnn");
+    if(g_awnn_engine){
+        if(g_nclass == 0){
+            printf("{\"event\":\"error\",\"msg\":\"awnn pack needs labels (class count)\"}\n");
+            return 1;
+        }
+        if(!awnn_init(dir)){
+            printf("{\"event\":\"error\",\"msg\":\"awnn engine init failed (LD_LIBRARY_PATH?)\"}\n");
+            return 1;
+        }
+    } else {
+        g_net.opt.num_threads = 1;
+        if(g_net.load_param(model_path(dir, g_m.param).c_str()) ||
+           g_net.load_model(model_path(dir, g_m.bin).c_str())){
+            printf("{\"event\":\"error\",\"msg\":\"model load failed\"}\n"); return 1;
+        }
+    }
+    printf("{\"event\":\"loaded\",\"name\":\"%s\",\"runtime\":\"%s\",\"input\":\"%dx%d\",\"classes\":%zu}\n",
+           g_m.name.c_str(), g_m.runtime.c_str(), g_m.w, g_m.h, g_m.labels.size());
 
     if(argc >= 4 && std::string(argv[2]) == "--image")
         return run_image_mode(dir, argv[3]);
@@ -544,5 +654,8 @@ out:
     ioctl(fbfd,FBIOBLANK,FB_BLANK_UNBLANK);
     munmap(FB,maplen); close(fbfd);
     fprintf(stderr, rc==0 ? "OK\n" : "FAILED\n");
-    return rc;
+    /* skip libc atexit teardown (see run_image_mode): MPP is already shut down
+     * cleanly above; AWNN's exit handlers segfault in ion frees */
+    fflush(NULL);
+    _exit(rc);
 }

@@ -134,8 +134,8 @@ deploy-nnacam: nnacam
 NCNN_DIST := board/ncnn/dist/board
 kbrun: bin/kbrun
 bin/kbrun: board/runner/kbrun.cpp board/runner/manifest.h | bin
-	$(CROSSXX) $(CROSSFLAGS) $(MPPDEF) $(MPPINC) -I$(NCNN_DIST)/include/ncnn \
-	  -static-libstdc++ -static-libgcc \
+	$(CROSSXX) $(CROSSFLAGS) $(MPPDEF) $(MPPINC) -Ivendor/libmaix -I$(NCNN_DIST)/include/ncnn \
+	  -static-libstdc++ -static-libgcc -Wl,--export-dynamic \
 	  -o $@ $< $(NCNN_DIST)/lib/libncnn.a -ldl -lpthread -lm
 	arm-unknown-linux-musleabihf-strip $@
 

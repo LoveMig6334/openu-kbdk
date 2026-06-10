@@ -98,6 +98,14 @@ Hard-won facts baked into kbdk (don't re-learn these):
   /dev/mmcblk0p4; mount` (both umounts succeed). kbdk md5-verifies every push ×3.
 - Pack manifest keys are `in_blob`/`out_blob`/`labels_file` (not `input`/`labels`) so
   the board's flat JSON parser (`board/runner/manifest.h`) finds them by unique key.
+- **kbrun has two engines**, picked by the manifest's `runtime` field: `ncnn` (static,
+  for self-converted packs) and `awnn` (dlopen's the board's libmaix_nn — for the stock
+  `/home/model/*` vendor models, which vanilla ncnn can't run and vice versa).
+  `board-models/imagenet-resnet18/` is such a pack: manifest + labels only; `files.param`/
+  `files.bin` are absolute board paths that deploy skips pushing. AWNN measured ~60–70 ms
+  /inf @224 (ImageNet-1000). **AWNN's atexit handlers segfault** (ion phy2vir spam) once a
+  model was loaded — kbrun ends with `_exit()` after its own MPP/fb cleanup to skip them.
+  AWNN packs need labels for the class count (labels_file fallback is in kbrun + scan_packs).
 - Training/convert/runner all share `(x−127.5)×0.0078125` ([−1,1]) normalization —
   changing one side silently breaks accuracy.
 - The camera's all-black glitch frames are avgY≈0; kbrun gates `avgY<8` (a dim room

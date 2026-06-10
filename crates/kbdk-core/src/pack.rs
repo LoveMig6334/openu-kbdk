@@ -29,6 +29,10 @@ pub struct PackFiles {
     pub labels_file: String,
 }
 
+fn default_runtime() -> String {
+    "ncnn".into()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub name: String,
@@ -36,9 +40,18 @@ pub struct Manifest {
     pub backbone: String,
     pub input: InputSpec,
     pub quant: String, // "int8" | "fp16"
+    /// "ncnn" (our static runtime, self-converted packs) or "awnn" (the board's
+    /// vendor libmaix_nn runtime — used for the stock /home/model/* models,
+    /// which vanilla ncnn cannot run and vice versa).
+    #[serde(default = "default_runtime")]
+    pub runtime: String,
     pub blobs: Blobs,
     pub files: PackFiles,
+    #[serde(default)]
     pub md5: std::collections::HashMap<String, String>,
+    /// May be empty when the pack relies on files.labels_file instead
+    /// (e.g. 1000 ImageNet labels don't belong inline in JSON).
+    #[serde(default)]
     pub labels: Vec<String>,
 }
 
@@ -51,9 +64,14 @@ impl Manifest {
         Ok(m)
     }
 
-    /// verify the referenced files exist and md5s match
+    /// verify the referenced files exist and md5s match. Absolute paths refer
+    /// to files already on the board (stock vendor models) — nothing to check
+    /// host-side.
     pub fn verify(&self, dir: &Path) -> Result<()> {
         for (key, rel) in [("param", &self.files.param), ("bin", &self.files.bin)] {
+            if rel.starts_with('/') {
+                continue;
+            }
             let data = std::fs::read(dir.join(rel))
                 .with_context(|| format!("pack file missing: {rel}"))?;
             let got = format!("{:x}", md5::compute(&data));

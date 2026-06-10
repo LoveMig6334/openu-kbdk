@@ -12,28 +12,47 @@ pub struct PackInfo {
     pub backbone: String,
     pub input: String,
     pub quant: String,
+    pub runtime: String,
+    pub builtin: bool, // board-models/: stock vendor model, files live on the board
     pub n_labels: usize,
 }
 
-pub fn scan_packs(packs_dir: &Path) -> Vec<PackInfo> {
-    let mut v = vec![];
+fn scan_dir(packs_dir: &Path, builtin: bool, v: &mut Vec<PackInfo>) {
     let Ok(rd) = std::fs::read_dir(packs_dir) else {
-        return v;
+        return;
     };
     for e in rd.filter_map(|e| e.ok()) {
         let dir = e.path();
         if let Ok(m) = kbdk_core::pack::Manifest::load(&dir) {
+            let n_labels = if m.labels.is_empty() {
+                std::fs::read_to_string(dir.join(&m.files.labels_file))
+                    .map(|s| s.lines().count())
+                    .unwrap_or(0)
+            } else {
+                m.labels.len()
+            };
             v.push(PackInfo {
                 dir,
                 name: m.name,
                 backbone: m.backbone,
                 input: format!("{}x{}", m.input.width, m.input.height),
                 quant: m.quant,
-                n_labels: m.labels.len(),
+                runtime: m.runtime,
+                builtin,
+                n_labels,
             });
         }
     }
-    v.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+/// Your converted packs (packs/) + the stock board models (board-models/).
+pub fn scan_packs(packs_dir: &Path) -> Vec<PackInfo> {
+    let mut v = vec![];
+    scan_dir(packs_dir, false, &mut v);
+    if let Some(repo) = packs_dir.parent() {
+        scan_dir(&repo.join("board-models"), true, &mut v);
+    }
+    v.sort_by(|a, b| (a.builtin, &a.name).cmp(&(b.builtin, &b.name)));
     v
 }
 
@@ -62,18 +81,32 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
         .corner_radius(6.0)
         .inner_margin(8.0)
         .show(ui, |ui| {
-            egui::Grid::new("packs").num_columns(6).spacing([16.0, 6.0]).striped(true).show(ui, |ui| {
+            egui::Grid::new("packs").num_columns(7).spacing([16.0, 6.0]).striped(true).show(ui, |ui| {
                 ui.label(egui::RichText::new("name").color(theme::SUBTEXT));
                 ui.label(egui::RichText::new("backbone").color(theme::SUBTEXT));
                 ui.label(egui::RichText::new("input").color(theme::SUBTEXT));
+                ui.label(egui::RichText::new("runtime").color(theme::SUBTEXT));
                 ui.label(egui::RichText::new("quant").color(theme::SUBTEXT));
                 ui.label(egui::RichText::new("classes").color(theme::SUBTEXT));
                 ui.label("");
                 ui.end_row();
                 for p in &app.packs {
-                    ui.label(egui::RichText::new(&p.name).color(theme::TEXT).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&p.name).color(theme::TEXT).strong());
+                        if p.builtin {
+                            ui.label(
+                                egui::RichText::new("board built-in")
+                                    .color(theme::MAUVE)
+                                    .small(),
+                            );
+                        }
+                    });
                     ui.label(&p.backbone);
                     ui.label(&p.input);
+                    ui.colored_label(
+                        if p.runtime == "awnn" { theme::MAUVE } else { theme::BLUE },
+                        &p.runtime,
+                    );
                     ui.label(&p.quant);
                     ui.label(p.n_labels.to_string());
                     ui.horizontal(|ui| {

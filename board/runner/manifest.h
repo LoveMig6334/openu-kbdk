@@ -9,7 +9,7 @@
 #include <vector>
 
 struct KbManifest {
-    std::string name, task, backbone, quant, in_blob, out_blob, param, bin, labels_file;
+    std::string name, task, backbone, quant, runtime, in_blob, out_blob, param, bin, labels_file;
     int w = 0, h = 0;
     float mean[3] = {0, 0, 0}, norm[3] = {0, 0, 0};
     std::vector<std::string> labels;
@@ -62,6 +62,8 @@ static bool mf_load(const char* path, KbManifest& m){
     fclose(f);
     m.name = mf_str(s, "name"); m.task = mf_str(s, "task");
     m.backbone = mf_str(s, "backbone"); m.quant = mf_str(s, "quant");
+    m.runtime = mf_str(s, "runtime");
+    if(m.runtime.empty()) m.runtime = "ncnn";
     m.w = (int)mf_num(s, "width"); m.h = (int)mf_num(s, "height");
     mf_floats3(s, "mean", m.mean); mf_floats3(s, "norm", m.norm);
     m.in_blob = mf_str(s, "in_blob");

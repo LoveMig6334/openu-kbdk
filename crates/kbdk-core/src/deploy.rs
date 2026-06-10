@@ -22,6 +22,10 @@ pub fn deploy_pack(t: &dyn Transport, local_dir: &Path) -> Result<String> {
         m.files.bin.as_str(),
         m.files.labels_file.as_str(),
     ] {
+        // absolute paths = stock model files already on the board; don't push
+        if rel.starts_with('/') {
+            continue;
+        }
         t.push(&local_dir.join(rel), &format!("{remote}/{rel}"))?;
     }
     Ok(remote)
