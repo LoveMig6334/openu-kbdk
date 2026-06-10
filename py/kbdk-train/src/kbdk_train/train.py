@@ -30,7 +30,35 @@ def make_transforms(size: int):
     )
 
 
+def npu_slim(n_classes: int) -> nn.Sequential:
+    """NPU-compatible tiny classifier (V831 NVDLA nv_small): plain 3x3 convs +
+    BN (folded into the conv at compile time) + ReLU + 2x2 maxpool, head is a
+    4x4 conv to 1x1 logits. No depthwise, no Linear, every conv's in_c <= 32
+    (the verified NVDLA weight-layout limit). Input is fixed 64x64."""
+    from collections import OrderedDict
+
+    def block(i: int, cin: int, cout: int) -> list[tuple[str, nn.Module]]:
+        # named entries: pnnx's generated python chokes on bare-Sequential
+        # numeric attribute names (`self.2 = ...`)
+        return [
+            (f"conv{i}", nn.Conv2d(cin, cout, 3, 1, 1, bias=False)),
+            (f"bn{i}", nn.BatchNorm2d(cout)),
+            (f"relu{i}", nn.ReLU(inplace=True)),
+            (f"pool{i}", nn.MaxPool2d(2, 2)),
+        ]
+    return nn.Sequential(OrderedDict(
+        block(1, 3, 16)      # 64 -> 32
+        + block(2, 16, 32)   # 32 -> 16
+        + block(3, 32, 32)   # 16 -> 8
+        + block(4, 32, 32)   # 8 -> 4
+        + [("head", nn.Conv2d(32, n_classes, 4)),  # 4x4 -> 1x1 logits
+           ("flatten", nn.Flatten())]
+    ))
+
+
 def make_model(backbone: str, n_classes: int) -> nn.Module:
+    if backbone == "npu_slim":
+        return npu_slim(n_classes)
     if backbone == "mobilenet_v2":
         m = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
         m.classifier[1] = nn.Linear(m.last_channel, n_classes)
@@ -38,7 +66,7 @@ def make_model(backbone: str, n_classes: int) -> nn.Module:
         m = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
         m.fc = nn.Linear(m.fc.in_features, n_classes)
     else:
-        raise ValueError(f"unknown backbone {backbone} (mobilenet_v2 | resnet18)")
+        raise ValueError(f"unknown backbone {backbone} (mobilenet_v2 | resnet18 | npu_slim)")
     return m
 
 

@@ -51,6 +51,7 @@ int8 ncnn pack → `kbdk deploy/run` → 100% correct on held-out images on the 
 cargo build                       # crates/kbdk-core (lib) + kbdk-cli (kbdk) + kbdk-ui (egui app)
 sh board/ncnn/build.sh            # one-time: pinned ncnn -> board lib + host quantize tools
 make kbrun                        # board runner (static libncnn + dlopen'd MPP camera)
+make nna-runner                   # GPL NVDLA job executor (kbrun spawns it for nvdla packs)
 (cd py && uv sync)                # Python workspace: kbdk-train + kbdk-convert
 
 kbdk devices                      # adb serial + console port
@@ -59,6 +60,12 @@ kbdk train   --data DIR --out models/m.pt      # ImageFolder -> TorchScript (MPS
 kbdk convert --model models/m.pt --data DIR --name NAME   # -> packs/NAME (int8 ncnn)
 kbdk deploy packs/NAME            # md5-verified push to /mnt/UDISK/kbdk/NAME + runner
 kbdk run NAME [--frames N]        # live camera + overlay; kbdk log / kbdk stop
+
+# NPU (NVDLA) path: conv-only backbone -> int8 job -> runs on the V831's NPU
+kbdk train --data DIR --out models/m.pt --backbone npu_slim --size 64
+uv run --project py python -m kbdk_convert.nvdla_compile \
+    --model models/m.pt --data DIR --name NAME            # -> packs/NAME (runtime nvdla)
+# then kbdk deploy/run as usual; scripts/nvdla_{parity,verify}.py = hardware checks
 KBDK_HW=1 cargo test -p kbdk-core # hardware integration tests (board attached)
 cargo run -p kbdk-ui              # desktop app: Train/Convert/Deploy tabs (egui, Catppuccin Mocha)
 ```
@@ -119,6 +126,22 @@ Hard-won facts baked into kbdk (don't re-learn these):
   AWNN packs need labels for the class count (labels_file fallback is in kbrun + scan_packs).
 - Training/convert/runner all share `(x−127.5)×0.0078125` ([−1,1]) normalization —
   changing one side silently breaks accuracy.
+- **NVDLA runtime (`runtime: "nvdla"`) — models on the actual NPU.** kbrun stays MIT
+  and spawns the GPLv3 `/tmp/nna_runner` (built from `board/nvdla/` + `third_party/
+  v831-npu`, `make nna-runner`) in "serve" mode: `go\n` per frame over a pipe, packed
+  int8 input/output cubes through tmpfs files, weights + NPU mapping stay resident.
+  Compiler = `kbdk_convert.nvdla` (+ `nvdla_compile`): BN-fold → per-tensor int8 PTQ
+  (calibrated on the dataset) → fused CONV→SDP[→PDP] layers in an NVJ1 job file.
+  **Semantics are pinned byte-exact vs hardware** (scripts/nvdla_parity.py, 12+ configs):
+  feature cubes = 8-ch surfaces ordered C′→W→H→surface; DC weights = kernel groups
+  of 8, spatial-major, 1×1×C cubes (C≤32 — the >32 channel-group ordering is
+  UNVERIFIED, so npu_slim keeps every conv's in_c ≤ 32); SDP out-cvt =
+  `(acc + bias<<sh) * scale >> truncate` with **round half AWAY from zero**; PDP
+  floor-mode pools need negative-pad clamping. `npu_slim` (conv/BN/relu/maxpool,
+  64×64) measured **1.9 ms/inf on the NPU vs ~10 ms same-net int8 ncnn on CPU** —
+  inference outruns the 30 fps camera (infers ≈ frames in kbrun). The toy pack is
+  byte-exact host-sim↔board on 12/12 images. Depthwise is NOT supported by nv_small —
+  MobileNet-style nets can't go on the NPU; that's why npu_slim exists.
 - The camera's all-black glitch frames are avgY≈0; kbrun gates `avgY<8` (a dim room
   sits in the teens and must still classify).
 - **Detection (YOLOv2-slim)**: `kbdk train --task detection` takes a YOLO/Darknet
@@ -174,7 +197,7 @@ Capability status against the goal (all "raw ioctl/mmap, no vendor lib" except w
 | **Camera** | ✅ live preview on panel (raw + colour-corrected) | Standard V4L2 is unavailable here (`QBUF`/`DQBUF`/`QUERYBUF` ENOTTY — see `camdiag.c`); capture goes through Allwinner **MPP**. `cammpp.c` pulls NV21M frames (Y+VU phys/virt addrs, for processing); `campreview.c` shows the live camera on the 240×240 LCD via `AW_MPI_SYS_Bind(VI→VO)` (zero-copy hardware path); `camcc.c` is the colour-corrected CPU-path preview (MPP capture → per-pixel white-balance/saturation → `/dev/fb0`). All dlopen the board's `.so`; headers vendored under `vendor/eyesee-mpp/`. Raw colour is ISP-3A-limited (green/flat: near-white pixels converge to **U≈119 / V≈139** vs neutral 128, saturation ≈16); the proper fix is baked in `libisp.so`, but `camcc` neutralises it in software (U+9 / V−11, sat×1.6 — see the `camcc.c` note below). |
 | **GPIO / I²C / SPI / buttons** | ✅ ready | UAPI headers present; same raw-ioctl approach. Not yet written. |
 | **Audio** | ✅ working | `audio.c` — raw `SNDRV_PCM_IOCTL_*` on `/dev/snd/pcmC0D0{p,c}`, no alsa-lib. `probe`/`tone`/`play`/`rec`, all verified on hardware. Codec: playback 1–2 ch, capture mono-only, S16_LE/S24_LE, 8k–192k Hz. |
-| **NPU** (the "µAI") | ✅ CNN inference runs **on the NPU** from userspace (no kernel driver) | The V831 NPU is a customised **NVIDIA NVDLA `nv_small`** core. **Two working paths.** (1) *CPU/AWNN*: the board ships `libmaix_nn.so` (AWNN, a quantized-**ncnn** fork; `.param`+`.bin`, `7767517` magic); `nncls.c` dlopen's it and runs `fe_res18` (~31 ms/inf) — but it `open(/dev/nna)`-fails and falls back to **CPU** because this rootfs's kernel was built **without `CONFIG_SUNXI_NNA`** (no `nna_sunxi.ko`; DT node `nna@02400000` *is* present + `okay`). (2) *NPU/userspace*: drive the NVDLA core directly via `/dev/mem` (regs `0x2400000`, CCU `0x3001000`) + `/dev/ion` + `/dev/cedar_dev` — **no kernel module needed**. `make nnaprobe` proves the regs respond; `make nna-cifar10` runs a 4-conv CNN on the NPU (classifies the test image "ship : 127", verified). Built from vendored **GPLv3** `third_party/v831-npu/` (mtx512). See `docs/superpowers/specs/2026-06-08-npu-cnn-runtime-design.md`. |
+| **NPU** (the "µAI") | ✅ CNN inference runs **on the NPU** from userspace (no kernel driver) | The V831 NPU is a customised **NVIDIA NVDLA `nv_small`** core. **Two working paths.** (1) *CPU/AWNN*: the board ships `libmaix_nn.so` (AWNN, a quantized-**ncnn** fork; `.param`+`.bin`, `7767517` magic); `nncls.c` dlopen's it and runs `fe_res18` (~31 ms/inf) — but it `open(/dev/nna)`-fails and falls back to **CPU** because this rootfs's kernel was built **without `CONFIG_SUNXI_NNA`** (no `nna_sunxi.ko`; DT node `nna@02400000` *is* present + `okay`). (2) *NPU/userspace*: drive the NVDLA core directly via `/dev/mem` (regs `0x2400000`, CCU `0x3001000`) + `/dev/ion` + `/dev/cedar_dev` — **no kernel module needed**. `make nnaprobe` proves the regs respond; `make nna-cifar10` runs a 4-conv CNN on the NPU (classifies the test image "ship : 127", verified). Built from vendored **GPLv3** `third_party/v831-npu/` (mtx512). See `docs/superpowers/specs/2026-06-08-npu-cnn-runtime-design.md`. **kbdk now compiles trained models to the NPU** (`runtime: "nvdla"` packs — see the NVDLA runtime note in the kbdk facts list): npu_slim @64² = 1.9 ms/inf, byte-exact vs the host int8 simulation. |
 
 **Portability gaps to fix before publishing** (currently macOS-host-specific):
 - The toolchain is the third-party Homebrew tap `messense/macos-cross-toolchains` — Linux

@@ -16,14 +16,16 @@ pub fn deploy_pack(t: &dyn Transport, local_dir: &Path) -> Result<String> {
     if r.rc != 0 {
         bail!("mkdir {remote} failed rc={} ({})", r.rc, r.output.trim());
     }
+    let mut pushed = std::collections::HashSet::new();
     for rel in [
         "manifest.json",
         m.files.param.as_str(),
         m.files.bin.as_str(),
         m.files.labels_file.as_str(),
     ] {
-        // absolute paths = stock model files already on the board; don't push
-        if rel.starts_with('/') {
+        // absolute paths = stock model files already on the board; don't push.
+        // dedupe: nvdla packs point param and bin at the same job file.
+        if rel.starts_with('/') || !pushed.insert(rel.to_string()) {
             continue;
         }
         t.push(&local_dir.join(rel), &format!("{remote}/{rel}"))?;
@@ -31,12 +33,23 @@ pub fn deploy_pack(t: &dyn Transport, local_dir: &Path) -> Result<String> {
     Ok(remote)
 }
 
-/// Push the runner binary itself (bin/kbrun) to /tmp and chmod it.
+/// Push the runner binary itself (bin/kbrun) to /tmp and chmod it. A sibling
+/// bin/nna_runner (the GPL NVDLA executor kbrun spawns for runtime "nvdla"
+/// packs) rides along when present.
 pub fn deploy_runner(t: &dyn Transport, local_kbrun: &Path) -> Result<()> {
     t.push(local_kbrun, RUNNER)?;
     let r = t.exec(&format!("chmod +x {RUNNER}"), 15)?;
     if r.rc != 0 {
         bail!("chmod failed rc={}", r.rc);
+    }
+    if let Some(nv) = local_kbrun.parent().map(|d| d.join("nna_runner")) {
+        if nv.exists() {
+            t.push(&nv, "/tmp/nna_runner")?;
+            let r = t.exec("chmod +x /tmp/nna_runner", 15)?;
+            if r.rc != 0 {
+                bail!("chmod nna_runner failed rc={}", r.rc);
+            }
+        }
     }
     Ok(())
 }
