@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kbdk-core", "crates/kbdk-cli"]
+members = ["crates/kbdk-core", "crates/kbdk-cli", "crates/kbdk-ui"]
 
 [workspace.package]
 edition = "2021"

@@ -1,0 +1,19 @@
+[package]
+name = "kbdk-ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kbdk-ui"
+path = "src/main.rs"
+
+[dependencies]
+kbdk-core = { path = "../kbdk-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.34", features = ["persistence"] }
+egui_plot = "0.35"
+rfd = "0.17"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
