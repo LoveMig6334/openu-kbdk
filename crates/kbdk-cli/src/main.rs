@@ -62,6 +62,21 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         frames: u32,
     },
+    /// Fine-tune a backbone on an ImageFolder dataset (PyTorch MPS, via uv/Python)
+    Train {
+        /// ImageFolder dataset (one subdir per class)
+        #[arg(long)]
+        data: PathBuf,
+        /// TorchScript output path
+        #[arg(long, default_value = "models/model.pt")]
+        out: PathBuf,
+        #[arg(long, default_value = "mobilenet_v2")]
+        backbone: String,
+        #[arg(long, default_value_t = 5)]
+        epochs: u32,
+        #[arg(long, default_value_t = 224)]
+        size: u32,
+    },
     /// Convert a TorchScript model into a deployable int8 ncnn pack (via uv/Python)
     Convert {
         #[arg(long)]
@@ -177,6 +192,32 @@ fn main() -> Result<()> {
             let remote = format!("{}/{pack_name}", kbdk_core::deploy::BOARD_PACK_ROOT);
             kbdk_core::deploy::start_runner(t.as_ref(), &remote, &res, frames)?;
             println!("running {pack_name} ({res}); follow with `kbdk log`, stop with `kbdk stop`");
+        }
+        Cmd::Train {
+            data,
+            out,
+            backbone,
+            epochs,
+            size,
+        } => {
+            if let Some(dir) = out.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            run_py_streaming(
+                "kbdk-train",
+                &[
+                    "--data",
+                    &data.canonicalize()?.display().to_string(),
+                    "--out",
+                    &abs_path(&out)?,
+                    "--backbone",
+                    &backbone,
+                    "--epochs",
+                    &epochs.to_string(),
+                    "--size",
+                    &size.to_string(),
+                ],
+            )?;
         }
         Cmd::Convert {
             model,

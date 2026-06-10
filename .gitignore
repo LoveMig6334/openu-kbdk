@@ -11,3 +11,9 @@ board/ncnn/dist/
 board/ncnn/ncnn-src/
 board/ncnn/build-board/
 board/ncnn/build-host/
+packs/
+models/*.pt
+models/toy3/
+examples/toy-dataset/
+py/.venv/
+__pycache__/

@@ -239,6 +239,10 @@ requires-dist = [
 name = "kbdk-py"
 version = "0.1.0"
 source = { virtual = "." }
+dependencies = [
+    { name = "kbdk-convert" },
+    { name = "kbdk-train" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -246,6 +250,10 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "kbdk-convert", editable = "kbdk-convert" },
+    { name = "kbdk-train", editable = "kbdk-train" },
+]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.0.3" }]

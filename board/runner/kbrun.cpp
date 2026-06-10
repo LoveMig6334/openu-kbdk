@@ -472,7 +472,9 @@ int main(int argc, char **argv){
 
         unsigned long s=0,c=0; for (unsigned i=0;i<(unsigned)W*H;i+=16){ s+=Y[i]; c++; }
         unsigned long ay = c?s/c:0;
-        if (ay<20 || ay>240){
+        /* gate only the sensor's all-black glitch frames (avgY ~ 0); a dim room
+         * legitimately sits in the teens and must still classify */
+        if (ay<8 || ay>240){
             skipped++;
             if (skipped%30==1) fprintf(stderr, "skip avgY=%lu\n", ay);
             VI_ReleaseFrame(dev,chn,&fi);

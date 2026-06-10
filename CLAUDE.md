@@ -6,15 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A host-side toolkit for the **KidBright µAI** board (Allwinner V831 — single-core
 ARM Cortex-A7, armv7l hard-float NEON/VFPv4, Linux 4.9 BusyBox/Tina, musl libc).
-There is no network link to the board: everything happens over the serial console.
-Two kinds of code live here, compiled by two different compilers:
+No network link to the board; two host↔board channels exist:
 
-- **Host tools** (`src/uai.c`) — built native for the macOS arm64 host with `cc`.
-- **Board binaries** (`src/hello.c`, `src/fbtest.c`, `src/v4l2cap.c`,
-  `src/v4l2probe.c`) — cross-compiled for the V831, then pushed and run on the board.
+- **ADB over USB-OTG** (fast, preferred): the board runs `adbd` (FunctionFS gadget,
+  VID 0x18d1 PID 0x0002 "MaixPy3"). Root shell, no auth, `adb push` ≈ 5–6 MB/s,
+  `adb forward tcp:` works. adbd is ancient (no shell_v2): **no exit codes, stderr
+  merged** — kbdk wraps commands with sentinels to recover rc. CDC-ACM/RNDIS are
+  NOT in this kernel (configfs refuses `acm.*`).
+- **UART serial console** (115200 8N1, `/dev/cu.usbserial-210`): the fallback +
+  boot-log channel, driven by `bin/uai` or kbdk's serial transport.
 
-The central workflow is always: cross-compile on the Mac → transfer over serial via
-`uai` → execute on the board → read stdout/exit-code back over the same serial line.
+Code here is compiled by two different compilers:
+
+- **Host tools** (`src/uai.c`, the `kbdk` Rust workspace) — native macOS arm64.
+- **Board binaries** (`src/*.c`, `board/runner/kbrun.cpp`) — cross-compiled for the
+  V831, pushed (adb or uai), run on the board.
 
 ## Project goal
 
@@ -30,6 +36,59 @@ If it works, the intent is to **publish it on GitHub** as a low-level-control to
 others working with this board. That implies a portability bar beyond "works on my Mac":
 the cross-toolchain setup, board assumptions, and any vendor blobs need to be documented
 and reproducible (see the toolchain notes below).
+
+## kbdk — the dev-kit platform (Rust + Python + board runner)
+
+The repo's second layer (branch `kbdk-platform`): fine-tune a model on the Mac,
+convert it, push it over ADB, and run it live on the board's camera. Spec:
+`docs/superpowers/specs/2026-06-10-devkit-platform-design.md`; plan:
+`docs/superpowers/plans/2026-06-10-kbdk-platform-phase1-5.md`. **End-to-end verified
+on hardware 2026-06-10**: toy 3-class dataset → MobileNetV2 fine-tune (MPS) →
+int8 ncnn pack → `kbdk deploy/run` → 100% correct on held-out images on the board
+(470 ms/inf @224), live camera + label overlay streaming JSON results.
+
+```sh
+cargo build                       # crates/kbdk-core (lib) + crates/kbdk-cli (kbdk)
+sh board/ncnn/build.sh            # one-time: pinned ncnn -> board lib + host quantize tools
+make kbrun                        # board runner (static libncnn + dlopen'd MPP camera)
+(cd py && uv sync)                # Python workspace: kbdk-train + kbdk-convert
+
+kbdk devices                      # adb serial + console port
+kbdk exec "uname -a"              # sentinel-wrapped exec, real rc, adb or serial
+kbdk train   --data DIR --out models/m.pt      # ImageFolder -> TorchScript (MPS)
+kbdk convert --model models/m.pt --data DIR --name NAME   # -> packs/NAME (int8 ncnn)
+kbdk deploy packs/NAME            # md5-verified push to /mnt/UDISK/kbdk/NAME + runner
+kbdk run NAME [--frames N]        # live camera + overlay; kbdk log / kbdk stop
+KBDK_HW=1 cargo test -p kbdk-core # hardware integration tests (board attached)
+```
+
+Hard-won facts baked into kbdk (don't re-learn these):
+- **AWNN can't run vanilla ncnn**: `libmaix_nn.so` loads a vanilla .param/.bin without
+  error then forwards to saturated int8 garbage (needs proprietary quantize keys
+  `20=/21=/22=/-23328/-23329`; the ncnn→AWNN converter is MaixHub-online-only).
+  Proven with `make nnload`. Hence kbdk ships its own runner on **pinned vanilla ncnn**
+  (`board/ncnn/build.sh`, commit b16501a, musl-armhf static, no vulkan/omp/threads).
+- **Model packs must be int8**: fp32 ResNet18 (47 MB weights) is OOM-killed on the
+  64 MB board. Measured @224: MobileNetV2 int8 466 ms / 15 MB RSS (the default);
+  ResNet18 int8 *runs* but ncnn's armv7 int8 requantize path is pathological
+  (4.6–6.1 s/inf) — don't default to ResNet. AWNN's own resnet18 does ~80 ms, so
+  there's kernel headroom; possible future NVDLA/tuning work.
+- **musl 1.1.16 shims in kbrun.cpp**: `__fstat_time64` (ncnn's file mapping reads only
+  st_size; musl 1.2's arm stat = 1.1 layout with 64-bit times appended), plus
+  `secure_getenv`/`getentropy` for static libstdc++. Check new board binaries with
+  `nm -D -u` for `*_time64` leaks before shipping.
+- **adbd kills the whole process group on session close** (no setsid/nohup applet):
+  backgrounding via shell cannot survive. `kbrun` self-daemonizes (KBRUN_DAEMON=1 →
+  fork + setsid synced via pipe + writes /tmp/kbrun.pid).
+- **/mnt/UDISK (= mmcblk0p4 vfat, also /root) corrupts**: I/O errors flip it to
+  read-only (`errors=remount-ro`). Recovery: `umount /root /mnt/UDISK; fsck.fat -a
+  /dev/mmcblk0p4; mount` (both umounts succeed). kbdk md5-verifies every push ×3.
+- Pack manifest keys are `in_blob`/`out_blob`/`labels_file` (not `input`/`labels`) so
+  the board's flat JSON parser (`board/runner/manifest.h`) finds them by unique key.
+- Training/convert/runner all share `(x−127.5)×0.0078125` ([−1,1]) normalization —
+  changing one side silently breaks accuracy.
+- The camera's all-black glitch frames are avgY≈0; kbrun gates `avgY<8` (a dim room
+  sits in the teens and must still classify).
 
 ## Build & run
 

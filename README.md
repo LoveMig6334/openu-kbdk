@@ -1,12 +1,40 @@
 # kidbright-uai
 
-Low-level C toolkit for the **KidBright µAI** board (Allwinner V831, single-core
-ARM Cortex-A7, armv7l hard-float NEON/VFPv4, Linux 4.9 BusyBox/Tina, musl libc).
-Cross-compile C on the Mac, drive the board over its serial console, and talk to
-the hardware **directly** (syscall / ioctl / mmap, or the vendor MPP API where the
-kernel forces it) — instead of going through the board's CodeBlock / MaixPy stack.
-The goal is full control over the screen, audio, camera (and eventually GPIO/NPU)
-for building AIoT projects without the vendor library's limits.
+Low-level C toolkit **and AI dev-kit platform (kbdk)** for the **KidBright µAI**
+board (Allwinner V831, single-core ARM Cortex-A7, armv7l hard-float NEON/VFPv4,
+Linux 4.9 BusyBox/Tina, musl libc).
+Cross-compile C on the Mac, drive the board over USB (ADB gadget) or its serial
+console, and talk to the hardware **directly** (syscall / ioctl / mmap, or the
+vendor MPP API where the kernel forces it) — instead of going through the board's
+CodeBlock / MaixPy stack. The goal is full control over the screen, audio, camera
+(and eventually GPIO/NPU) for building AIoT projects without the vendor library's
+limits.
+
+## kbdk: train on the Mac → run live on the board
+
+The `kbdk` platform (Rust CLI + Python pipeline + C++ board runner) fine-tunes an
+image classifier and deploys it to the board's camera + LCD:
+
+```sh
+cargo build && (cd py && uv sync)         # host tools (Rust + Python via uv)
+sh board/ncnn/build.sh && make kbrun      # pinned ncnn runtime + board runner
+
+uv run --with pillow --with numpy python examples/make_toy_dataset.py
+./target/debug/kbdk train   --data examples/toy-dataset --out models/toy3/model.pt
+./target/debug/kbdk convert --model models/toy3/model.pt --data examples/toy-dataset --name toy3
+./target/debug/kbdk deploy packs/toy3
+./target/debug/kbdk run toy3              # live camera + label overlay on the panel
+./target/debug/kbdk log && ./target/debug/kbdk stop
+```
+
+Train = PyTorch MPS (MobileNetV2/ResNet18 transfer learning, ImageFolder datasets).
+Convert = pnnx → ncnn → int8 (calibrated on your dataset, host-verified parity).
+Deploy = md5-verified push over the board's **ADB USB gadget** (~6 MB/s; serial
+console fallback built in). Run = `kbrun`, statically-linked vanilla **ncnn**
+(the vendor's AWNN runtime cannot run self-converted models — see CLAUDE.md),
+MPP camera capture, gray-world AWB, fb0 preview + label overlay, JSON-lines
+results over `kbdk log`. Measured: MobileNetV2-int8 @224 ≈ 470 ms/inf, preview
+~27 fps concurrently.
 
 ## What works
 
