@@ -113,6 +113,12 @@ deploy-nna-cifar10: nna-cifar10
 	$(UAI) push bin/nna_cifar10 /tmp/nna_cifar10 && $(UAI) exec "chmod +x /tmp/nna_cifar10"
 	@echo 'run: ./bin/uai exec "/tmp/nna_cifar10"'
 
+# Generic NVDLA job executor (GPLv3 like everything that links third_party/v831-npu;
+# kept out of the MIT kbrun binary on purpose). Jobs come from py kbdk_convert.nvdla.
+nna-runner: bin/nna_runner
+bin/nna_runner: board/nvdla/nna_runner.cpp $(NPUSRC) | bin
+	$(CROSSXX) $(CROSSFLAGS) -fpermissive -Wno-unused-but-set-variable $(NPUINC) -o $@ $^ -lpthread
+
 # Live camera + on-screen classifier: MPP capture (dlopen'd) + AWNN ResNet18 ImageNet-1000
 # (libmaix_nn.so, dlopen'd) in one process, inference on a background thread.
 # Needs -Wl,--export-dynamic for the retinaface back-ref stubs (see nncls).
