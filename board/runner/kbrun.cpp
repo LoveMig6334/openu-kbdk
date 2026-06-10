@@ -415,6 +415,28 @@ static void *infer_thread(void *arg){
     return NULL;
 }
 
+/* ---- preview frame export (host UI shows the camera) -------------------------- */
+/* Every few frames the balanced 240x240 RGB preview is dropped into tmpfs with a
+ * tiny dims header; the host pulls it over adb and shows it in kbdk-ui. The
+ * write-then-rename keeps pulls from seeing a half-written frame. */
+#define PREV_W 240
+#define PREV_H 240
+#define PREV_PATH "/tmp/kbrun_frame.rgb"
+#define PREV_TMP  "/tmp/.kbrun_frame.tmp"
+
+static void write_preview(const uint8_t *Y, const uint8_t *VU, int W, int H){
+    static unsigned char buf[PREV_W * PREV_H * 3];
+    nv21_to_rgb_in(Y, VU, W, H, buf, PREV_W, PREV_H);
+    FILE *f = fopen(PREV_TMP, "wb");
+    if(!f) return;
+    unsigned char hdr[8] = {'K','B','F','1',
+        PREV_W & 0xFF, PREV_W >> 8, PREV_H & 0xFF, PREV_H >> 8};
+    fwrite(hdr, 1, sizeof hdr, f);
+    fwrite(buf, 1, sizeof buf, f);
+    fclose(f);
+    rename(PREV_TMP, PREV_PATH);
+}
+
 /* ---- one-shot file mode (host parity verification) ---------------------------- */
 static int run_image_mode(const std::string& dir, const char *img_path){
     size_t need = (size_t)g_m.w * g_m.h * 3;
@@ -592,6 +614,8 @@ int main(int argc, char **argv){
         }
 
         update_awb(Y, VU, fr->mWidth, fr->mHeight);
+
+        if (k % 3 == 0) write_preview(Y, VU, fr->mWidth, fr->mHeight);
 
         /* hand the latest frame to the inference worker (non-blocking; latest wins) */
         nv21_to_rgb_in(Y, VU, fr->mWidth, fr->mHeight, rgb, g_m.w, g_m.h);

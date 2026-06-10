@@ -178,50 +178,87 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
         }
     });
 
-    if let Some(r) = &app.last_result {
+    let show_feed = app.last_result.is_some() || app.cam_tex.is_some();
+    if show_feed {
         ui.add_space(8.0);
-        egui::Frame::default()
-            .fill(theme::CRUST)
-            .corner_radius(8.0)
-            .inner_margin(14.0)
-            .show(ui, |ui| {
-                let top = r["top"].as_array().cloned().unwrap_or_default();
-                if let Some(best) = top.first() {
-                    let label = best["label"].as_str().unwrap_or("?");
-                    let conf = best["conf"].as_f64().unwrap_or(0.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(label)
-                                .color(theme::GREEN)
-                                .size(34.0)
-                                .strong(),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("{:.0}%", conf * 100.0))
-                                .color(theme::TEXT)
-                                .size(26.0),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("{} ms", r["ms"].as_f64().unwrap_or(0.0)))
-                                .color(theme::SUBTEXT),
-                        );
+        ui.horizontal_top(|ui| {
+            // live camera preview (pulled from the board's /tmp/kbrun_frame.rgb)
+            if let Some(tex) = &app.cam_tex {
+                egui::Frame::default()
+                    .fill(theme::CRUST)
+                    .corner_radius(8.0)
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::Image::new(tex)
+                                    .fit_to_exact_size(egui::vec2(280.0, 280.0))
+                                    .corner_radius(4.0),
+                            );
+                            ui.colored_label(theme::SUBTEXT, "board camera (AWB preview)");
+                        });
                     });
-                    ui.add(egui::ProgressBar::new(conf as f32).fill(theme::GREEN).desired_height(6.0));
-                }
-                ui.add_space(6.0);
-                for t in top.iter().skip(1).take(4) {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(t["label"].as_str().unwrap_or("?")).color(theme::SUBTEXT),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("{:.1}%", t["conf"].as_f64().unwrap_or(0.0) * 100.0))
-                                .color(theme::OVERLAY0),
-                        );
+            }
+            if let Some(r) = &app.last_result {
+                egui::Frame::default()
+                    .fill(theme::CRUST)
+                    .corner_radius(8.0)
+                    .inner_margin(14.0)
+                    .show(ui, |ui| {
+                        ui.set_max_width(420.0);
+                        ui.vertical(|ui| {
+                        let top = r["top"].as_array().cloned().unwrap_or_default();
+                        if let Some(best) = top.first() {
+                            let label = best["label"].as_str().unwrap_or("?");
+                            let conf = best["conf"].as_f64().unwrap_or(0.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(label)
+                                        .color(theme::GREEN)
+                                        .size(34.0)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0}%", conf * 100.0))
+                                        .color(theme::TEXT)
+                                        .size(26.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} ms",
+                                        r["ms"].as_f64().unwrap_or(0.0)
+                                    ))
+                                    .color(theme::SUBTEXT),
+                                );
+                            });
+                            ui.add(
+                                egui::ProgressBar::new(conf as f32)
+                                    .fill(theme::GREEN)
+                                    .desired_height(6.0),
+                            );
+                        }
+                        ui.add_space(6.0);
+                        for t in top.iter().skip(1).take(4) {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(t["label"].as_str().unwrap_or("?"))
+                                        .color(theme::SUBTEXT),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{:.1}%",
+                                        t["conf"].as_f64().unwrap_or(0.0) * 100.0
+                                    ))
+                                    .color(theme::OVERLAY0),
+                                );
+                            });
+                        }
+                        });
                     });
-                }
-            });
-    } else if app.running {
+            }
+        });
+    }
+    if app.running && !show_feed {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.spinner();

@@ -23,7 +23,23 @@ pub enum Msg {
     RunDone(Result<(), String>),
     StopDone,
     BoardResult(serde_json::Value),
+    /// Latest camera preview frame pulled from the board (RGB888).
+    BoardFrame { w: usize, h: usize, rgb: Vec<u8> },
     BoardNote(String),
+}
+
+/// Parse the kbrun preview file: "KBF1" + u16le w + u16le h + w*h*3 RGB bytes.
+pub fn parse_preview(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    if data.len() < 8 || &data[0..4] != b"KBF1" {
+        return None;
+    }
+    let w = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let h = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let need = 8 + w * h * 3;
+    if w == 0 || h == 0 || data.len() < need {
+        return None;
+    }
+    Some((w, h, data[8..need].to_vec()))
 }
 
 pub struct Workers {
@@ -144,7 +160,8 @@ impl Workers {
         self.start_log_poller();
     }
 
-    /// While running: every 2 s pull the last result JSON-line from /tmp/kbrun.log.
+    /// While running: pull the camera preview frame (every ~400 ms) and the last
+    /// result JSON-line (every ~2 s) from the board.
     fn start_log_poller(&self) {
         self.polling.store(true, Ordering::Relaxed);
         let polling = self.polling.clone();
@@ -152,26 +169,42 @@ impl Workers {
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let t = AdbTransport::new(None);
+            let frame_local = std::env::temp_dir().join(format!("kbdk_frame_{}.rgb", std::process::id()));
+            let mut tick: u32 = 0;
             while polling.load(Ordering::Relaxed) {
-                match t.exec("tail -n 3 /tmp/kbrun.log 2>/dev/null; true", 15) {
-                    Ok(r) => {
-                        for line in r.output.lines().rev() {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
-                                if v["event"] == "result" {
-                                    let _ = tx.send(Msg::BoardResult(v));
-                                    ctx.request_repaint();
-                                    break;
+                // camera preview every tick
+                if t.pull("/tmp/kbrun_frame.rgb", &frame_local).is_ok() {
+                    if let Ok(data) = std::fs::read(&frame_local) {
+                        if let Some((w, h, rgb)) = parse_preview(&data) {
+                            let _ = tx.send(Msg::BoardFrame { w, h, rgb });
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+                // result line every 5th tick (~2 s)
+                if tick % 5 == 0 {
+                    match t.exec("tail -n 3 /tmp/kbrun.log 2>/dev/null; true", 15) {
+                        Ok(r) => {
+                            for line in r.output.lines().rev() {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                                    if v["event"] == "result" {
+                                        let _ = tx.send(Msg::BoardResult(v));
+                                        ctx.request_repaint();
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Msg::BoardNote(format!("log poll: {e}")));
-                        ctx.request_repaint();
+                        Err(e) => {
+                            let _ = tx.send(Msg::BoardNote(format!("log poll: {e}")));
+                            ctx.request_repaint();
+                        }
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                tick += 1;
+                std::thread::sleep(std::time::Duration::from_millis(400));
             }
+            let _ = std::fs::remove_file(&frame_local);
         });
     }
 }

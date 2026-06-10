@@ -73,6 +73,7 @@ pub struct KbdkApp {
     pub running: bool,
     pub last_result: Option<serde_json::Value>,
     pub board_note: String,
+    pub cam_tex: Option<egui::TextureHandle>,
 
     frame_count: u32,
     shot_requested: bool,
@@ -122,6 +123,7 @@ impl KbdkApp {
             running: false,
             last_result: None,
             board_note: String::new(),
+            cam_tex: None,
             frame_count: 0,
             shot_requested: false,
             started: std::time::Instant::now(),
@@ -209,6 +211,19 @@ impl KbdkApp {
                     self.board_note = "stopped".into();
                 }
                 Msg::BoardResult(v) => self.last_result = Some(v),
+                Msg::BoardFrame { w, h, rgb } => {
+                    let img = egui::ColorImage::from_rgb([w, h], &rgb);
+                    match &mut self.cam_tex {
+                        Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.cam_tex = Some(self.workers.ctx.load_texture(
+                                "board-cam",
+                                img,
+                                egui::TextureOptions::LINEAR,
+                            ))
+                        }
+                    }
+                }
                 Msg::BoardNote(s) => self.board_note = s,
             }
         }
