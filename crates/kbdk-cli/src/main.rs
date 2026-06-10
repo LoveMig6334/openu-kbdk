@@ -62,10 +62,77 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         frames: u32,
     },
+    /// Convert a TorchScript model into a deployable int8 ncnn pack (via uv/Python)
+    Convert {
+        #[arg(long)]
+        model: PathBuf,
+        /// ImageFolder dataset (labels from class dirs; calibration images)
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "packs")]
+        out: PathBuf,
+        #[arg(long, default_value_t = 224)]
+        size: u32,
+        #[arg(long, default_value = "mobilenet_v2")]
+        backbone: String,
+    },
     /// Stop a running kbrun
     Stop,
     /// Show the runner's recent JSON results + stderr tail
     Log,
+}
+
+/// Absolute path for a possibly-not-yet-existing dir (canonicalize needs existence).
+fn abs_path(p: &std::path::Path) -> Result<String> {
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(p)
+    };
+    Ok(abs.display().to_string())
+}
+
+/// Run a Python console script from the py/ uv workspace, re-emitting its
+/// JSON-lines progress (stdout passes through; events also summarized to stderr).
+fn run_py_streaming(script: &str, args: &[&str]) -> Result<()> {
+    use std::io::BufRead;
+    let repo = std::env::current_dir()?;
+    let mut child = std::process::Command::new("uv")
+        .current_dir(repo.join("py"))
+        .arg("run")
+        .arg(script)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("spawn uv: {e} (is uv installed?)"))?;
+    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line?;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            let ev = v["event"].as_str().unwrap_or("?");
+            match ev {
+                "error" => eprintln!("[{script}] ERROR: {}", v["msg"].as_str().unwrap_or("?")),
+                _ => eprintln!("[{script}] {ev} {}", summary(&v)),
+            }
+        }
+        println!("{line}");
+    }
+    let st = child.wait()?;
+    if !st.success() {
+        anyhow::bail!("{script} failed");
+    }
+    Ok(())
+}
+
+fn summary(v: &serde_json::Value) -> String {
+    let mut parts = vec![];
+    for (k, val) in v.as_object().into_iter().flatten() {
+        if k != "event" && !val.is_null() {
+            parts.push(format!("{k}={val}"));
+        }
+    }
+    parts.join(" ")
 }
 
 fn main() -> Result<()> {
@@ -110,6 +177,34 @@ fn main() -> Result<()> {
             let remote = format!("{}/{pack_name}", kbdk_core::deploy::BOARD_PACK_ROOT);
             kbdk_core::deploy::start_runner(t.as_ref(), &remote, &res, frames)?;
             println!("running {pack_name} ({res}); follow with `kbdk log`, stop with `kbdk stop`");
+        }
+        Cmd::Convert {
+            model,
+            data,
+            name,
+            out,
+            size,
+            backbone,
+        } => {
+            run_py_streaming(
+                "kbdk-convert",
+                &[
+                    "--model",
+                    &model.canonicalize()?.display().to_string(),
+                    "--data",
+                    &data.canonicalize()?.display().to_string(),
+                    "--name",
+                    &name,
+                    "--out",
+                    &abs_path(&out)?,
+                    "--width",
+                    &size.to_string(),
+                    "--height",
+                    &size.to_string(),
+                    "--backbone",
+                    &backbone,
+                ],
+            )?;
         }
         Cmd::Stop => {
             kbdk_core::deploy::stop_runner(make_transport(&cli.transport, cli.serial)?.as_ref())?;
