@@ -112,42 +112,22 @@ fn abs_path(p: &std::path::Path) -> Result<String> {
 /// Run a Python console script from the py/ uv workspace, re-emitting its
 /// JSON-lines progress (stdout passes through; events also summarized to stderr).
 fn run_py_streaming(script: &str, args: &[&str]) -> Result<()> {
-    use std::io::BufRead;
+    use kbdk_core::pipeline::{self, PyEvent};
     let repo = std::env::current_dir()?;
-    let mut child = std::process::Command::new("uv")
-        .current_dir(repo.join("py"))
-        .arg("run")
-        .arg(script)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("spawn uv: {e} (is uv installed?)"))?;
-    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
-        let line = line?;
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    pipeline::run_py_script(&repo, script, &args, &mut |e| match e {
+        PyEvent::Line(v) => {
             let ev = v["event"].as_str().unwrap_or("?");
             match ev {
                 "error" => eprintln!("[{script}] ERROR: {}", v["msg"].as_str().unwrap_or("?")),
-                _ => eprintln!("[{script}] {ev} {}", summary(&v)),
+                _ => eprintln!("[{script}] {ev} {}", pipeline::summarize(&v)),
             }
+            println!("{v}");
         }
-        println!("{line}");
-    }
-    let st = child.wait()?;
-    if !st.success() {
-        anyhow::bail!("{script} failed");
-    }
-    Ok(())
-}
-
-fn summary(v: &serde_json::Value) -> String {
-    let mut parts = vec![];
-    for (k, val) in v.as_object().into_iter().flatten() {
-        if k != "event" && !val.is_null() {
-            parts.push(format!("{k}={val}"));
-        }
-    }
-    parts.join(" ")
+        PyEvent::Raw(line) => println!("{line}"),
+        PyEvent::Exited(_) => {}
+    })
+    .map_err(|_| anyhow::anyhow!("{script} failed"))
 }
 
 fn main() -> Result<()> {
