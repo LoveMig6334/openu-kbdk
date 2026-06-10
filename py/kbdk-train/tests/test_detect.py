@@ -73,3 +73,15 @@ def test_train_two_epochs(tmp_path, toy_det):
     raw = m(torch.rand(1, 3, 224, 224)).detach().numpy()[0]
     assert raw.shape == (5 * (5 + 2), 7, 7)
     decode_boxes(raw, sidecar["anchors"], 2, conf_thresh=0.99)  # shape-sane, no crash
+
+
+def test_npu_det_backbone_shape():
+    """npu_det: conv-only YOLOv2 head for the NVDLA path — 112x112 -> 7x7 grid,
+    A*(5+C) channels, traceable, no depthwise/linear."""
+    import torch
+    from kbdk_train.detect import npu_det
+
+    m = npu_det(n_classes=3, n_anchors=5)
+    out = m(torch.rand(2, 3, 112, 112))
+    assert out.shape == (2, 5 * (5 + 3), 7, 7)
+    torch.jit.trace(m.eval(), torch.rand(1, 3, 112, 112))

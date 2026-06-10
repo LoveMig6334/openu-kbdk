@@ -97,10 +97,18 @@ def test_weight_pack_partial_last_group_is_packed_tight():
     assert buf[g2 + C] == wt[9, 0, 0, 0]
 
 
-def test_weight_pack_rejects_wide_channels_for_now():
-    wt = np.zeros((8, 40, 3, 3), dtype=np.int8)  # C > 32 ordering unverified
-    with pytest.raises(ValueError):
-        nvdla.pack_weights(wt)
+def test_weight_pack_wide_channels_chunk_major():
+    # C=40 -> chunk of 32 + remainder chunk of 8, chunk-major within the group
+    K, C, KH, KW = 8, 40, 3, 3
+    rng = np.random.default_rng(6)
+    wt = rng.integers(-128, 128, size=(K, C, KH, KW), dtype=np.int8)
+    buf = np.frombuffer(nvdla.pack_weights(wt), dtype=np.int8)
+    assert buf.size == K * C * KH * KW
+    # first chunk: kernel 1, spatial (1,1), channels 0..31 are the first 32 bytes
+    np.testing.assert_array_equal(buf[:32], wt[0, :32, 0, 0])
+    # second chunk starts after 8 kernels x 9 positions x 32 channels
+    c2 = K * KH * KW * 32
+    np.testing.assert_array_equal(buf[c2:c2 + 8], wt[0, 32:, 0, 0])
 
 
 # ---- int-exact conv + SDP reference ----------------------------------------------

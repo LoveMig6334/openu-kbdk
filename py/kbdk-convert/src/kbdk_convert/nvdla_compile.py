@@ -271,48 +271,35 @@ def load_calib_images(data_dir: Path, size: int) -> tuple[np.ndarray, list[str],
     return np.stack(imgs), classes, labels
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="npu_slim TorchScript -> NVDLA pack")
-    ap.add_argument("--model", required=True, type=Path)
-    ap.add_argument("--data", required=True, type=Path)
-    ap.add_argument("--name", required=True)
-    ap.add_argument("--out-dir", type=Path, default=None)
-    ap.add_argument("--size", type=int, default=64)
-    a = ap.parse_args(argv)
-    out_dir = a.out_dir or Path("packs") / a.name
+def load_yolo_images(data_dir: Path, size: int) -> tuple[np.ndarray, list[str]]:
+    """YOLO/Darknet layout (images/, classes.txt) -> (imgs resized, classes)."""
+    classes = (data_dir / "classes.txt").read_text().split()
+    imgs = []
+    for p in sorted((data_dir / "images").iterdir()):
+        if p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            continue
+        im = Image.open(p).convert("RGB").resize((size, size))
+        imgs.append(np.asarray(im, dtype=np.uint8))
+    return np.stack(imgs), classes
 
-    imgs, classes, labels = load_calib_images(a.data, a.size)
 
-    from kbdk_train.train import npu_slim
-    model = npu_slim(len(classes)).eval()
-    sd = torch.jit.load(str(a.model), map_location="cpu").state_dict()
-    model.load_state_dict(sd)
+def _float_logits(model, img: np.ndarray) -> np.ndarray:
+    x = torch.from_numpy(((img.astype(np.float32) / 255.0) - 0.5) / 0.5)
+    return model(x.permute(2, 0, 1).unsqueeze(0)).detach().numpy()[0]
 
-    flayers = extract_slim_layers(model)
-    qlayers, meta = quantize_slim(flayers, imgs)
 
-    # int8-sim vs float top-1 agreement over the dataset
-    agree = correct = 0
-    for img, lab in zip(imgs, labels):
-        qlog = simulate(qlayers, preprocess(img)).reshape(-1)[:len(classes)]
-        x = torch.from_numpy(((img.astype(np.float32) / 255.0) - 0.5) / 0.5)
-        flog = model(x.permute(2, 0, 1).unsqueeze(0)).detach().numpy().reshape(-1)
-        agree += int(np.argmax(qlog) == np.argmax(flog))
-        correct += int(np.argmax(qlog) == lab)
-    n = len(labels)
-    print(json.dumps({"event": "parity", "int8_vs_float_top1": agree / n,
-                      "int8_acc": correct / n, "n": n}))
-
-    job, info = build_job(qlayers, a.size, a.size)
+def _write_pack(out_dir: Path, name: str, task: str, backbone: str, size: int,
+                classes: list[str], job: bytes, info: dict, meta: dict,
+                detection: dict | None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "job.nvj").write_bytes(job)
     (out_dir / "labels.txt").write_text("\n".join(classes) + "\n")
     md5 = hashlib.md5(job).hexdigest()
     manifest = {
-        "name": a.name,
-        "task": "classification",
-        "backbone": "npu_slim",
-        "input": {"width": a.size, "height": a.size,
+        "name": name,
+        "task": task,
+        "backbone": backbone,
+        "input": {"width": size, "height": size,
                   "mean": [127.5] * 3, "norm": [0.0078125] * 3},
         "quant": "int8",
         "runtime": "nvdla",
@@ -324,7 +311,88 @@ def main(argv=None) -> int:
                   "nv_in_size": info["in_size"], "nv_out_size": info["out_size"],
                   "nv_out_c": info["out_dims"][0]},
     }
+    if detection:
+        manifest["detection"] = detection
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="npu_slim/npu_det TorchScript -> NVDLA pack")
+    ap.add_argument("--model", required=True, type=Path)
+    ap.add_argument("--data", required=True, type=Path)
+    ap.add_argument("--name", required=True)
+    ap.add_argument("--out-dir", type=Path, default=None)
+    ap.add_argument("--size", type=int, default=None,
+                    help="input size (default: 64, or the detection meta's size)")
+    a = ap.parse_args(argv)
+    out_dir = a.out_dir or Path("packs") / a.name
+
+    # a model.pt.meta.json sidecar with task "detection" switches the flow
+    meta_path = Path(str(a.model) + ".meta.json")
+    det_meta = None
+    if meta_path.exists():
+        m = json.loads(meta_path.read_text())
+        if m.get("task") == "detection":
+            det_meta = m
+
+    if det_meta:
+        size = a.size or det_meta["size"]
+        classes = det_meta["classes"]
+        anchors = det_meta["anchors"]
+        imgs, _ = load_yolo_images(a.data, size)
+
+        from kbdk_train.detect import decode_boxes, nms, npu_det
+        model = npu_det(len(classes), len(anchors) // 2).eval()
+        model.load_state_dict(torch.jit.load(str(a.model), map_location="cpu").state_dict())
+
+        qlayers, meta = quantize_slim(extract_slim_layers(model), imgs)
+
+        # box-level parity: decode the int8-sim map vs the float map
+        hit = tot = 0
+        for img in imgs:
+            qmap = simulate(qlayers, preprocess(img)).astype(np.float32) / meta["logit_scale"]
+            qdets = nms(decode_boxes(qmap, anchors, len(classes), 0.5))
+            fdets = nms(decode_boxes(_float_logits(model, img), anchors, len(classes), 0.5))
+            tot += len(fdets)
+            from kbdk_train.detect import box_iou
+            for fd in fdets:
+                if any(fd[0] == qd[0] and box_iou(fd[2:], qd[2:]) > 0.5 for qd in qdets):
+                    hit += 1
+        print(json.dumps({"event": "parity", "int8_vs_float_boxes": hit / max(tot, 1),
+                          "n_float_boxes": tot, "n_images": len(imgs)}))
+
+        job, info = build_job(qlayers, size, size)
+        detection = {"grid": det_meta["grid"], "anchors": anchors,
+                     "conf_threshold": det_meta.get("conf_threshold", 0.5),
+                     "nms_threshold": det_meta.get("nms_threshold", 0.45)}
+        _write_pack(out_dir, a.name, "detection", "npu-det", size, classes,
+                    job, info, meta, detection)
+        print(json.dumps({"event": "saved", "pack": str(out_dir), **info}))
+        return 0
+
+    size = a.size or 64
+    imgs, classes, labels = load_calib_images(a.data, size)
+
+    from kbdk_train.train import npu_slim
+    model = npu_slim(len(classes)).eval()
+    model.load_state_dict(torch.jit.load(str(a.model), map_location="cpu").state_dict())
+
+    qlayers, meta = quantize_slim(extract_slim_layers(model), imgs)
+
+    # int8-sim vs float top-1 agreement over the dataset
+    agree = correct = 0
+    for img, lab in zip(imgs, labels):
+        qlog = simulate(qlayers, preprocess(img)).reshape(-1)[:len(classes)]
+        flog = _float_logits(model, img).reshape(-1)
+        agree += int(np.argmax(qlog) == np.argmax(flog))
+        correct += int(np.argmax(qlog) == lab)
+    n = len(labels)
+    print(json.dumps({"event": "parity", "int8_vs_float_top1": agree / n,
+                      "int8_acc": correct / n, "n": n}))
+
+    job, info = build_job(qlayers, size, size)
+    _write_pack(out_dir, a.name, "classification", "npu_slim", size, classes,
+                job, info, meta, None)
     print(json.dumps({"event": "saved", "pack": str(out_dir), **info}))
     return 0
 

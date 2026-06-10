@@ -12,10 +12,12 @@ hardware by scripts/nvdla_parity.py):
 - feature cube [C,H,W]: channels split into surfaces of 8; within a surface,
   1x1x8 cubes ordered C' -> W -> H -> surface. Partial surfaces still occupy
   8 bytes per pixel (padded with zeros).
-- DC int8 weights [K,C,KH,KW]: kernels in groups of 8; within a group, spatial
-  positions row-major; per position, each kernel's 1x1xC cube back to back.
-  The last group packs tight (no padding to 8). C <= 32 only — the >32
-  channel-group ordering is not verified yet.
+- DC int8 weights [K,C,KH,KW]: kernels in groups of 8; channels in chunks of
+  32 ("1x1xc cubes", c <= 32). Within a kernel group, chunk-major: for each
+  channel chunk, spatial positions row-major, and per position each kernel's
+  1x1xc cube back to back. Last kernel group and last chunk pack tight.
+  (C <= 32 verified by milestone (a); the chunk-major >32 ordering verified
+  on hardware by the milestone (d) parity runs.)
 
 SDP math per layer (out_cvt semantics pinned down by the parity harness, byte-
 exact on hardware): acc(int32) -> + bias<<bias_lshift -> *out_scale, then
@@ -59,16 +61,17 @@ def feature_size(c: int, h: int, w: int) -> int:
 
 
 def pack_weights(wt: np.ndarray) -> bytes:
-    """int8 [K,C,KH,KW] -> direct-conv weight bytes (kernel groups of 8)."""
+    """int8 [K,C,KH,KW] -> direct-conv weight bytes (kernel groups of 8,
+    channel chunks of 32, chunk-major within the group)."""
     assert wt.dtype == np.int8 and wt.ndim == 4
     k, c, kh, kw = wt.shape
-    if c > 32:
-        raise ValueError("kernel channel > 32: NVDLA channel-group ordering not verified yet")
     parts = []
     for g in range(0, k, ATOM):
         grp = wt[g:g + ATOM]  # [kg,C,KH,KW]
-        # spatial row-major -> kernel-in-group -> channel
-        parts.append(grp.transpose(2, 3, 0, 1).tobytes())
+        for cg in range(0, c, 32):
+            sub = grp[:, cg:cg + 32]  # [kg,csub,KH,KW]
+            # spatial row-major -> kernel-in-group -> channel-in-chunk
+            parts.append(sub.transpose(2, 3, 0, 1).tobytes())
     return b"".join(parts)
 
 
