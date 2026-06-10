@@ -65,7 +65,11 @@ cargo run -p kbdk-ui              # desktop app: Train/Convert/Deploy tabs (egui
 
 `kbdk-ui` notes: all blocking work (uv subprocesses via `kbdk-core::pipeline`,
 board I/O, device polling) runs on worker threads reporting over mpsc; the UI
-thread only renders. Field state persists via eframe Storage. Verification hooks
+thread only renders. Field state persists via eframe Storage. The Deploy & Run
+tab shows the **live board camera** (kbrun drops a 240×240 RGB preview with a
+KBF1 header into /tmp every 3rd frame; the host pulls it over adb every ~400 ms)
+and has **dataset capture**: 📷 Capture / burst save frames as PNGs into
+`<dataset>/<class>/` ImageFolder layout for the Train tab. Verification hooks
 (used by automated checks, harmless otherwise): `--screenshot PATH` (self-captures
 the viewport — no macOS screen-recording permission needed), `--tab train|convert|deploy`,
 `KBDK_SHOT_DELAY=secs`, `KBDK_AUTOTRAIN=1`, `KBDK_AUTOCONVERT=1`, `KBDK_POLL=1`

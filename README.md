@@ -30,7 +30,11 @@ uv run --with pillow --with numpy python examples/make_toy_dataset.py
 Prefer a GUI? `cargo run -p kbdk-ui` opens the desktop app (egui, Catppuccin
 Mocha): pick a dataset, watch live loss/accuracy curves while training on MPS,
 convert with an int8-parity check, then deploy and watch the board's live
-classifications stream in.
+camera + classifications stream in. The Deploy & Run tab also lists the
+board's stock models (ImageNet ResNet-18 via the vendor AWNN runtime) and can
+**capture frames from the board camera into ImageFolder datasets** (single
+shot or burst) — point the camera at your objects, collect a dataset, train,
+deploy, all without leaving the app.
 
 Train = PyTorch MPS (MobileNetV2/ResNet18 transfer learning, ImageFolder datasets).
 Convert = pnnx → ncnn → int8 (calibrated on your dataset, host-verified parity).
