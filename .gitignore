@@ -7,3 +7,7 @@ bin/
 captures/*
 !captures/*.py
 target/
+board/ncnn/dist/
+board/ncnn/ncnn-src/
+board/ncnn/build-board/
+board/ncnn/build-host/
