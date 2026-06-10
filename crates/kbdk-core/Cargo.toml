@@ -9,3 +9,4 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 md5 = "0.7"
+serialport = { version = "4", default-features = false }
