@@ -355,6 +355,25 @@ static int run_image_mode(const std::string& dir, const char *img_path){
 
 int main(int argc, char **argv){
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    /* KBRUN_DAEMON=1: detach into a new session FIRST (before any heavy work).
+     * adbd kills the session's whole process group when its shell closes (this
+     * BusyBox has no setsid/nohup), so backgrounding from the shell can't
+     * survive. The pipe makes the parent wait until the child has setsid()'d —
+     * without it the group kill races the child between fork and setsid. */
+    if(getenv("KBRUN_DAEMON")){
+        int pfd[2];
+        if(pipe(pfd) == 0){
+            pid_t p = fork();
+            if(p > 0){ char c; (void)!read(pfd[0], &c, 1); _exit(0); }
+            setsid();
+            (void)!write(pfd[1], "x", 1);
+            close(pfd[0]); close(pfd[1]);
+            FILE *pf = fopen("/tmp/kbrun.pid", "w");
+            if(pf){ fprintf(pf, "%d\n", getpid()); fclose(pf); }
+        }
+    }
+
     if(argc < 2){
         fprintf(stderr, "usage: %s PACK_DIR [--image RAW.rgb | [WxH] [nframes] [sat] [flip]]\n", argv[0]);
         return 2;
@@ -385,6 +404,7 @@ int main(int argc, char **argv){
     GV=(int)(0.714*sat*256+0.5); BU=(int)(1.772*sat*256+0.5);
 
     signal(SIGTERM,on_stop); signal(SIGINT,on_stop);
+    signal(SIGHUP,SIG_IGN);                             /* adbd HUPs on session close */
     signal(SIGALRM,on_alarm); alarm(30);                /* guards setup */
 
     int fbfd = open("/dev/fb0", O_RDWR);
