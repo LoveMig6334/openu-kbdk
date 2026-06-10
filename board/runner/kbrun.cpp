@@ -338,6 +338,7 @@ static bool awnn_init(const std::string& dir){
 #define NV_OUT "/tmp/kbrun_nv_out.bin"
 static FILE *g_nv_to = NULL, *g_nv_from = NULL;
 static unsigned char *g_nv_inbuf = NULL;   /* 8ch-padded feature cube, w*h*8 */
+static signed char *g_nv_outbuf = NULL;    /* raw output cube, nv_out_size */
 
 static bool nvdla_init(const std::string& dir){
     std::string job = model_path(dir, g_m.param);
@@ -364,7 +365,8 @@ static bool nvdla_init(const std::string& dir){
     while(fgets(line, sizeof line, g_nv_from)){
         if(strstr(line, "\"loaded\"")){
             g_nv_inbuf = (unsigned char*)calloc((size_t)g_m.w * g_m.h, 8);
-            return g_nv_inbuf != NULL;
+            g_nv_outbuf = (signed char*)malloc(g_m.nv_out_size);
+            return g_nv_inbuf && g_nv_outbuf;
         }
         if(strstr(line, "\"error\"")){ fprintf(stderr, "nna_runner: %s", line); return false; }
     }
@@ -372,8 +374,8 @@ static bool nvdla_init(const std::string& dir){
     return false;
 }
 
-/* one forward on interleaved RGB via the NPU child; fills dequantized logits */
-static bool nvdla_forward(const unsigned char *rgb, std::vector<float>& logits){
+/* one forward on interleaved RGB via the NPU child; raw cube -> g_nv_outbuf */
+static bool nvdla_exchange(const unsigned char *rgb){
     size_t npix = (size_t)g_m.w * g_m.h;
     for(size_t i = 0; i < npix; i++){
         unsigned char *d = g_nv_inbuf + i * 8;   /* ch 3..7 stay zero (calloc) */
@@ -394,14 +396,18 @@ static bool nvdla_forward(const unsigned char *rgb, std::vector<float>& logits){
     if(feof(g_nv_from)) return false;            /* child died */
     f = fopen(NV_OUT, "rb");
     if(!f) return false;
-    /* logits are 1x1 spatial: channel c sits at byte c (8-padded surfaces are
-     * contiguous when w==h==1) */
-    signed char q[256];
-    int n = (int)fread(q, 1, sizeof q, f);
+    int n = (int)fread(g_nv_outbuf, 1, g_m.nv_out_size, f);
     fclose(f);
-    if(n < g_m.nv_out_c) return false;
+    return n == g_m.nv_out_size;
+}
+
+/* classification: logits are 1x1 spatial, so channel c sits at byte c
+ * (8-padded surfaces are contiguous when w==h==1) */
+static bool nvdla_forward(const unsigned char *rgb, std::vector<float>& logits){
+    if(!nvdla_exchange(rgb)) return false;
     logits.resize(g_m.nv_out_c);
-    for(int i = 0; i < g_m.nv_out_c; i++) logits[i] = (float)q[i] / g_m.logit_scale;
+    for(int i = 0; i < g_m.nv_out_c; i++)
+        logits[i] = (float)g_nv_outbuf[i] / g_m.logit_scale;
     return true;
 }
 
@@ -522,9 +528,26 @@ static void decode_dets(const ncnn::Mat& out, std::vector<Det>& dets){
     }
 }
 
-/* forward + decode on interleaved RGB (ncnn engine only) */
+/* forward + decode on interleaved RGB (ncnn or nvdla engine) */
 static bool detect_forward(const unsigned char *rgb, std::vector<Det>& dets, double *ms){
     double t0 = now_ms();
+    if(g_nvdla_engine){
+        /* NPU raw map -> ncnn::Mat for the shared decode. Packed feature cube:
+         * channel c, row gi, col gj at (c/8)*(8*S*S) + gi*8*S + gj*8 + c%8 */
+        if(!nvdla_exchange(rgb)) return false;
+        if(ms) *ms = now_ms() - t0;
+        int S = g_m.grid, C = g_m.nv_out_c;
+        ncnn::Mat out(S, S, C);
+        for(int c = 0; c < C; c++){
+            const signed char *surf = g_nv_outbuf + (size_t)(c / 8) * 8 * S * S + (c % 8);
+            float *row = out.channel(c);
+            for(int gi = 0; gi < S; gi++)
+                for(int gj = 0; gj < S; gj++)
+                    row[gi * S + gj] = (float)surf[(gi * S + gj) * 8] / g_m.logit_scale;
+        }
+        decode_dets(out, dets);
+        return true;
+    }
     ncnn::Mat in = ncnn::Mat::from_pixels(rgb, ncnn::Mat::PIXEL_RGB, g_m.w, g_m.h);
     in.substract_mean_normalize(g_m.mean, g_m.norm);
     ncnn::Mat out;
@@ -788,10 +811,6 @@ int main(int argc, char **argv){
     g_awnn_engine = (g_m.runtime == "awnn");
     g_nvdla_engine = (g_m.runtime == "nvdla");
     if(g_nvdla_engine){
-        if(g_m.task == "detection"){
-            printf("{\"event\":\"error\",\"msg\":\"nvdla detection not supported yet\"}\n");
-            return 1;
-        }
         if(!nvdla_init(dir)){
             printf("{\"event\":\"error\",\"msg\":\"nvdla engine init failed (nna_runner pushed?)\"}\n");
             return 1;

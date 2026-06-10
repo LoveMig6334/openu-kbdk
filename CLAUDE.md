@@ -137,11 +137,23 @@ Hard-won facts baked into kbdk (don't re-learn these):
   of 8, spatial-major, 1×1×C cubes (C≤32 — the >32 channel-group ordering is
   UNVERIFIED, so npu_slim keeps every conv's in_c ≤ 32); SDP out-cvt =
   `(acc + bias<<sh) * scale >> truncate` with **round half AWAY from zero**; PDP
-  floor-mode pools need negative-pad clamping. `npu_slim` (conv/BN/relu/maxpool,
-  64×64) measured **1.9 ms/inf on the NPU vs ~10 ms same-net int8 ncnn on CPU** —
-  inference outruns the 30 fps camera (infers ≈ frames in kbrun). The toy pack is
-  byte-exact host-sim↔board on 12/12 images. Depthwise is NOT supported by nv_small —
-  MobileNet-style nets can't go on the NPU; that's why npu_slim exists.
+  floor-mode pools need negative-pad clamping; >32-channel kernels = chunk-major
+  channel groups of 32 (verified in_c 40/48/64); 1×1 kernels work. `npu_slim`
+  (conv/BN/relu/maxpool, 64×64) measured **1.9 ms/inf on the NPU vs ~10 ms same-net
+  int8 ncnn on CPU** — inference outruns the 30 fps camera (infers ≈ frames in
+  kbrun). The toy pack is byte-exact host-sim↔board on 12/12 images. Depthwise is
+  NOT supported by nv_small — MobileNet-style nets can't go on the NPU; that's why
+  npu_slim exists.
+- **Detection on the NPU**: `kbdk train --task detection --backbone npu_slim --size 112`
+  trains `npu_det` (conv-only YOLOv2, 112×112 → 7×7 grid, 1×1-conv head to
+  A·(5+C)); the same `nvdla_compile` invocation detects the `.meta.json` sidecar
+  and emits a detection pack (manifest `detection` object + nvdla keys). kbrun's
+  nvdla engine unpacks the raw map cube into an `ncnn::Mat` and reuses
+  `decode_dets` — board boxes == host boxes. Measured **3.0 ms/inf** (vs ~560–720 ms
+  for the mbv2 CPU detection); live detection keeps camera rate (~30 infers/s vs
+  ~1.4). Verified end-to-end: byte-exact maps 12/12, identical boxes 15/15, and the
+  synthetic-trained model boxing a real red ball live in the UI.
+  `scripts/nvdla_verify_det.py` is the hardware check.
 - The camera's all-black glitch frames are avgY≈0; kbrun gates `avgY<8` (a dim room
   sits in the teens and must still classify).
 - **Detection (YOLOv2-slim)**: `kbdk train --task detection` takes a YOLO/Darknet

@@ -35,6 +35,7 @@ def main(argv=None) -> int:
                 size=args.size,
                 batch_size=args.batch_size,
                 device_str=args.device,
+                backbone=args.backbone,
             )
             return 0
         classes = train(
