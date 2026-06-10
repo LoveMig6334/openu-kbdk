@@ -3,7 +3,12 @@ name = "kbdk-train"
 version = "0.1.0"
 description = "Fine-tune torchvision backbones on ImageFolder datasets (MPS), export TorchScript"
 requires-python = ">=3.12"
-dependencies = ["torch>=2.4", "torchvision", "pillow"]
+dependencies = [
+    "torch>=2.4",
+    "torchvision",
+    "pillow",
+    "numpy>=2.4.6",
+]
 
 [project.scripts]
 kbdk-train = "kbdk_train.cli:main"

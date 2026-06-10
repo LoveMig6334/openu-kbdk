@@ -263,6 +263,7 @@ name = "kbdk-train"
 version = "0.1.0"
 source = { editable = "kbdk-train" }
 dependencies = [
+    { name = "numpy" },
     { name = "pillow" },
     { name = "torch" },
     { name = "torchvision" },
@@ -270,6 +271,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "numpy", specifier = ">=2.4.6" },
     { name = "pillow" },
     { name = "torch", specifier = ">=2.4" },
     { name = "torchvision" },

@@ -19,3 +19,4 @@ py/.venv/
 __pycache__/
 models/
 datasets/
+examples/toy-detection/

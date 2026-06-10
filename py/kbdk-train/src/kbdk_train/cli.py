@@ -12,6 +12,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="fine-tune a backbone on an ImageFolder dataset")
     ap.add_argument("--data", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path, help="TorchScript output .pt")
+    ap.add_argument("--task", default="classification", choices=["classification", "detection"])
     ap.add_argument("--backbone", default="mobilenet_v2")
     ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -23,6 +24,19 @@ def main(argv=None) -> int:
 
     try:
         args.out.parent.mkdir(parents=True, exist_ok=True)
+        if args.task == "detection":
+            from .detect import train_detection
+
+            train_detection(
+                args.data,
+                args.epochs,
+                args.lr,
+                args.out,
+                size=args.size,
+                batch_size=args.batch_size,
+                device_str=args.device,
+            )
+            return 0
         classes = train(
             args.data,
             args.backbone,
