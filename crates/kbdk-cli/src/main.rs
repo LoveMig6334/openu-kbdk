@@ -62,14 +62,16 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         frames: u32,
     },
-    /// Fine-tune a backbone on an ImageFolder dataset (PyTorch MPS, via uv/Python)
+    /// Fine-tune a model (PyTorch MPS, via uv/Python). classification = ImageFolder
+    /// dataset; detection = YOLO/Darknet dataset (images/, labels/, classes.txt)
     Train {
-        /// ImageFolder dataset (one subdir per class)
         #[arg(long)]
         data: PathBuf,
         /// TorchScript output path
         #[arg(long, default_value = "models/model.pt")]
         out: PathBuf,
+        #[arg(long, default_value = "classification", value_parser = ["classification", "detection"])]
+        task: String,
         #[arg(long, default_value = "mobilenet_v2")]
         backbone: String,
         #[arg(long, default_value_t = 5)]
@@ -176,6 +178,7 @@ fn main() -> Result<()> {
         Cmd::Train {
             data,
             out,
+            task,
             backbone,
             epochs,
             size,
@@ -190,6 +193,8 @@ fn main() -> Result<()> {
                     &data.canonicalize()?.display().to_string(),
                     "--out",
                     &abs_path(&out)?,
+                    "--task",
+                    &task,
                     "--backbone",
                     &backbone,
                     "--epochs",

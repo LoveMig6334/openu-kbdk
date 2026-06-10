@@ -114,6 +114,19 @@ Hard-won facts baked into kbdk (don't re-learn these):
   changing one side silently breaks accuracy.
 - The camera's all-black glitch frames are avgY≈0; kbrun gates `avgY<8` (a dim room
   sits in the teens and must still classify).
+- **Detection (YOLOv2-slim)**: `kbdk train --task detection` takes a YOLO/Darknet
+  dataset (`images/`, `labels/*.txt` `cls cx cy w h` normalized, `classes.txt` — the
+  labelImg/Roboflow export format). Model = MobileNetV2 features + Conv head →
+  raw (A·(5+C))×7×7 map (pure convs → pnnx/int8 clean); anchors are k-means'd from
+  the dataset and travel in a `model.pt.meta.json` sidecar → manifest `detection`
+  object {grid, anchors, conf_threshold, nms_threshold}. Decode (sigmoid/exp/softmax
+  + per-class NMS) runs on CPU, implemented twice and kept in sync: python
+  `kbdk_train.detect.decode_boxes`/`nms` (eval + int8 parity) and kbrun's
+  `decode_dets`. Board↔host box parity verified near-exact; ~560 ms/inf standalone,
+  ~720 ms with live preview. The panel and the net see the *same centre square*, so
+  normalized boxes map 1:1 onto fb0 and the UI preview. Toy generator:
+  `examples/make_toy_detection.py` (trained 60 epochs → det_rate 1.0; generalized to
+  a real photographed red ball at 91%).
 
 ## Build & run
 

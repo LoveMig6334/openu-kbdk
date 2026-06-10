@@ -29,6 +29,16 @@ pub struct PackFiles {
     pub labels_file: String,
 }
 
+/// YOLOv2 head description for task == "detection".
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DetectionSpec {
+    pub grid: u32,
+    /// flat (w, h) pairs in grid units, kmeans'd from the training set
+    pub anchors: Vec<f32>,
+    pub conf_threshold: f32,
+    pub nms_threshold: f32,
+}
+
 fn default_runtime() -> String {
     "ncnn".into()
 }
@@ -53,6 +63,8 @@ pub struct Manifest {
     /// (e.g. 1000 ImageNet labels don't belong inline in JSON).
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub detection: Option<DetectionSpec>,
 }
 
 impl Manifest {

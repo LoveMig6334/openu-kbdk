@@ -56,6 +56,50 @@ pub fn scan_packs(packs_dir: &Path) -> Vec<PackInfo> {
     v
 }
 
+/// per-class overlay palette (matches the board's DET_COL)
+const BOX_COLORS: [egui::Color32; 6] = [
+    theme::GREEN,
+    theme::RED,
+    theme::BLUE,
+    theme::YELLOW,
+    theme::MAUVE,
+    theme::TEAL,
+];
+
+/// Paint detection rects (normalized coords from the result JSON) over the
+/// camera preview. The preview and the net input are the same centre square,
+/// so the coords map 1:1.
+fn draw_boxes_overlay(ui: &egui::Ui, rect: egui::Rect, result: &Option<serde_json::Value>) {
+    let Some(r) = result else { return };
+    let Some(boxes) = r["boxes"].as_array() else { return };
+    let painter = ui.painter_at(rect);
+    for b in boxes {
+        let (x, y, w, h) = (
+            b["x"].as_f64().unwrap_or(0.0) as f32,
+            b["y"].as_f64().unwrap_or(0.0) as f32,
+            b["w"].as_f64().unwrap_or(0.0) as f32,
+            b["h"].as_f64().unwrap_or(0.0) as f32,
+        );
+        let col = BOX_COLORS[(b["index"].as_u64().unwrap_or(0) as usize) % 6];
+        let bo = egui::Rect::from_min_size(
+            rect.min + egui::vec2(x * rect.width(), y * rect.height()),
+            egui::vec2(w * rect.width(), h * rect.height()),
+        );
+        painter.rect_stroke(bo, 2.0, egui::Stroke::new(2.0, col), egui::StrokeKind::Outside);
+        painter.text(
+            bo.min + egui::vec2(3.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "{} {:.0}%",
+                b["label"].as_str().unwrap_or("?"),
+                b["conf"].as_f64().unwrap_or(0.0) * 100.0
+            ),
+            egui::FontId::proportional(12.0),
+            col,
+        );
+    }
+}
+
 pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
     ui.heading("Deploy & run on the board");
     ui.add_space(6.0);
@@ -193,11 +237,12 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
                             if let Some(tex) = &app.cam_tex {
-                                ui.add(
+                                let resp = ui.add(
                                     egui::Image::new(tex)
                                         .fit_to_exact_size(egui::vec2(280.0, 280.0))
                                         .corner_radius(4.0),
                                 );
+                                draw_boxes_overlay(ui, resp.rect, &app.last_result);
                             }
                             ui.colored_label(theme::SUBTEXT, "board camera (AWB preview)");
                             ui.add_space(6.0);
@@ -249,6 +294,41 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_max_width(420.0);
                         ui.vertical(|ui| {
+                        // detection result: object count + per-box list
+                        if let Some(boxes) = r["boxes"].as_array() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(if boxes.is_empty() {
+                                        "no objects".into()
+                                    } else {
+                                        format!("{} object{}", boxes.len(), if boxes.len() == 1 { "" } else { "s" })
+                                    })
+                                    .color(if boxes.is_empty() { theme::SUBTEXT } else { theme::GREEN })
+                                    .size(28.0)
+                                    .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{} ms", r["ms"].as_f64().unwrap_or(0.0)))
+                                        .color(theme::SUBTEXT),
+                                );
+                            });
+                            ui.add_space(4.0);
+                            for b in boxes {
+                                let col = BOX_COLORS[(b["index"].as_u64().unwrap_or(0) as usize) % 6];
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(col, "■");
+                                    ui.colored_label(col, b["label"].as_str().unwrap_or("?"));
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{:.0}%",
+                                            b["conf"].as_f64().unwrap_or(0.0) * 100.0
+                                        ))
+                                        .color(theme::TEXT),
+                                    );
+                                });
+                            }
+                            return;
+                        }
                         let top = r["top"].as_array().cloned().unwrap_or_default();
                         if let Some(best) = top.first() {
                             let label = best["label"].as_str().unwrap_or("?");

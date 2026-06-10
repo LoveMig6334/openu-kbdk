@@ -140,8 +140,50 @@ def verify_parity(
     return frac
 
 
+def host_infer_raw(param: Path, binf: Path, img_rgb, w, h, mean, norm, in_blob, out_blob, shape):
+    """Like host_infer but reshaped to the head map (A*(5+C), S, S) for decode."""
+    import numpy as np
+
+    flat = host_infer(param, binf, img_rgb, w, h, mean, norm, in_blob, out_blob)
+    return np.asarray(flat, dtype=np.float32).reshape(shape)
+
+
+def verify_parity_detection(
+    p32, b32, p8, b8, images, w, h, mean, norm, in_blob, out_blob, meta, min_agree=0.7
+) -> float:
+    """fp32 vs int8 agreement on decoded boxes: same top-box class + IoU>0.5
+    (or both finding nothing)."""
+    import numpy as np
+    from PIL import Image
+
+    from kbdk_train.detect import decode_boxes, box_iou, nms
+
+    A = len(meta["anchors"]) // 2
+    n_classes = len(meta["classes"])
+    shape = (A * (5 + n_classes), meta["grid"], meta["grid"])
+    agree = 0
+    for ip in images:
+        img = np.asarray(Image.open(ip).convert("RGB").resize((w, h)), dtype=np.uint8)
+        outs = []
+        for (pp, bb) in [(p32, b32), (p8, b8)]:
+            raw = host_infer_raw(pp, bb, img, w, h, mean, norm, in_blob, out_blob, shape)
+            dets = nms(decode_boxes(raw, meta["anchors"], n_classes, 0.3), meta["nms_threshold"])
+            outs.append(dets)
+        a, b = outs
+        if not a and not b:
+            agree += 1
+        elif a and b and a[0][0] == b[0][0] and box_iou(a[0][2:], b[0][2:]) > 0.5:
+            agree += 1
+    frac = agree / len(images)
+    emit("step", name="parity", box_agreement=frac)
+    if frac < min_agree:
+        raise RuntimeError(f"int8 detection parity too low: {frac:.2f} < {min_agree}")
+    return frac
+
+
 def build_pack(
-    name, task, backbone, qparam, qbin, labels, w, h, mean, norm, in_blob, out_blob, out_dir: Path
+    name, task, backbone, qparam, qbin, labels, w, h, mean, norm, in_blob, out_blob, out_dir: Path,
+    detection: dict | None = None,
 ) -> Path:
     pack = out_dir / name
     pack.mkdir(parents=True, exist_ok=True)
@@ -159,6 +201,13 @@ def build_pack(
         "md5": {"param": md5(pack / "model.param"), "bin": md5(pack / "model.bin")},
         "labels": labels,
     }
+    if detection:
+        manifest["detection"] = {
+            "grid": detection["grid"],
+            "anchors": detection["anchors"],
+            "conf_threshold": detection.get("conf_threshold", 0.5),
+            "nms_threshold": detection.get("nms_threshold", 0.45),
+        }
     (pack / "manifest.json").write_text(json.dumps(manifest, indent=2))
     emit("done", pack=str(pack))
     return pack

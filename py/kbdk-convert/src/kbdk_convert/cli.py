@@ -38,7 +38,20 @@ def main(argv=None) -> int:
     norm = [0.0078125, 0.0078125, 0.0078125]
 
     try:
-        if args.labels:
+        # detection models carry a meta sidecar written by kbdk-train
+        meta = None
+        meta_path = Path(str(args.model) + ".meta.json")
+        if args.task == "detection" or meta_path.exists():
+            if not meta_path.exists():
+                raise RuntimeError(f"detection needs the meta sidecar: {meta_path}")
+            meta = json.loads(meta_path.read_text())
+            args.task = "detection"
+            args.width = args.height = meta["size"]
+            args.backbone = meta.get("backbone", args.backbone)
+
+        if meta:
+            labels = meta["classes"]
+        elif args.labels:
             labels = args.labels.read_text().splitlines()
         else:
             labels = sorted(d.name for d in args.data.iterdir() if d.is_dir())
@@ -58,14 +71,22 @@ def main(argv=None) -> int:
             qparam, qbin = C.quantize(
                 param, binf, calib, args.width, args.height, mean, norm, wd
             )
-            C.verify_parity(
-                param, binf, qparam, qbin, calib[:16],
-                args.width, args.height, mean, norm, in_blob, out_blob,
-                min_agree=args.min_parity,
-            )
+            if meta:
+                C.verify_parity_detection(
+                    param, binf, qparam, qbin, calib[:16],
+                    args.width, args.height, mean, norm, in_blob, out_blob, meta,
+                    min_agree=args.min_parity,
+                )
+            else:
+                C.verify_parity(
+                    param, binf, qparam, qbin, calib[:16],
+                    args.width, args.height, mean, norm, in_blob, out_blob,
+                    min_agree=args.min_parity,
+                )
             C.build_pack(
                 args.name, args.task, args.backbone, qparam, qbin, labels,
                 args.width, args.height, mean, norm, in_blob, out_blob, args.out,
+                detection=meta,
             )
         return 0
     except Exception as e:  # noqa: BLE001 - single reporting point for the host

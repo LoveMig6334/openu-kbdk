@@ -378,6 +378,105 @@ static void print_result_json(const std::vector<float>& v, double ms){
     fflush(stdout);
 }
 
+/* ---- detection (YOLOv2 head decode + NMS, mirrors kbdk_train.detect) ---------- */
+struct Det { int cls; float conf, cx, cy, w, h; };
+
+static inline float sigmoidf_(float x){ return 1.0f / (1.0f + expf(-x)); }
+
+static float det_iou(const Det& a, const Det& b){
+    float x1a=a.cx-a.w/2, y1a=a.cy-a.h/2, x2a=a.cx+a.w/2, y2a=a.cy+a.h/2;
+    float x1b=b.cx-b.w/2, y1b=b.cy-b.h/2, x2b=b.cx+b.w/2, y2b=b.cy+b.h/2;
+    float iw = std::min(x2a,x2b) - std::max(x1a,x1b);
+    float ih = std::min(y2a,y2b) - std::max(y1a,y1b);
+    if(iw <= 0 || ih <= 0) return 0;
+    float inter = iw*ih, uni = a.w*a.h + b.w*b.h - inter;
+    return uni > 0 ? inter/uni : 0;
+}
+
+/* out: ncnn Mat (c=A*(5+C), h=S, w=S) -> NMS'd detections, normalized coords */
+static void decode_dets(const ncnn::Mat& out, std::vector<Det>& dets){
+    int A = (int)g_m.anchors.size() / 2, S = g_m.grid;
+    int C = g_nclass;
+    std::vector<Det> cand;
+    std::vector<float> cl(C);
+    for(int a = 0; a < A; a++){
+        float aw = g_m.anchors[2*a], ah = g_m.anchors[2*a+1];
+        for(int gi = 0; gi < S; gi++){
+            for(int gj = 0; gj < S; gj++){
+                float obj = sigmoidf_(out.channel(a*(5+C)+4).row(gi)[gj]);
+                if(obj < g_m.conf_threshold * 0.5f) continue;   /* cheap pre-gate */
+                float mx = -1e30f;
+                for(int c = 0; c < C; c++){ cl[c] = out.channel(a*(5+C)+5+c).row(gi)[gj]; mx = std::max(mx, cl[c]); }
+                float sum = 0;
+                for(int c = 0; c < C; c++){ cl[c] = expf(cl[c]-mx); sum += cl[c]; }
+                int best = 0;
+                for(int c = 1; c < C; c++) if(cl[c] > cl[best]) best = c;
+                float conf = obj * cl[best] / sum;
+                if(conf < g_m.conf_threshold) continue;
+                Det d;
+                d.cls = best; d.conf = conf;
+                d.cx = (gj + sigmoidf_(out.channel(a*(5+C)+0).row(gi)[gj])) / S;
+                d.cy = (gi + sigmoidf_(out.channel(a*(5+C)+1).row(gi)[gj])) / S;
+                d.w  = aw * expf(std::min(out.channel(a*(5+C)+2).row(gi)[gj], 8.0f)) / S;
+                d.h  = ah * expf(std::min(out.channel(a*(5+C)+3).row(gi)[gj], 8.0f)) / S;
+                cand.push_back(d);
+            }
+        }
+    }
+    std::sort(cand.begin(), cand.end(), [](const Det&a, const Det&b){ return a.conf > b.conf; });
+    dets.clear();
+    for(const Det& d : cand){
+        bool keep = true;
+        for(const Det& k : dets)
+            if(k.cls == d.cls && det_iou(d, k) >= g_m.nms_threshold){ keep = false; break; }
+        if(keep) dets.push_back(d);
+        if(dets.size() >= 16) break;
+    }
+}
+
+/* forward + decode on interleaved RGB (ncnn engine only) */
+static bool detect_forward(const unsigned char *rgb, std::vector<Det>& dets, double *ms){
+    double t0 = now_ms();
+    ncnn::Mat in = ncnn::Mat::from_pixels(rgb, ncnn::Mat::PIXEL_RGB, g_m.w, g_m.h);
+    in.substract_mean_normalize(g_m.mean, g_m.norm);
+    ncnn::Mat out;
+    ncnn::Extractor ex = g_net.create_extractor();
+    ex.input(g_m.in_blob.c_str(), in);
+    if(ex.extract(g_m.out_blob.c_str(), out)) return false;
+    if(ms) *ms = now_ms() - t0;
+    decode_dets(out, dets);
+    return true;
+}
+
+static void print_dets_json(const std::vector<Det>& dets, double ms){
+    printf("{\"event\":\"result\",\"ms\":%.1f,\"boxes\":[", ms);
+    for(size_t i = 0; i < dets.size(); i++){
+        const Det& d = dets[i];
+        printf("%s{\"label\":\"%s\",\"index\":%d,\"conf\":%.3f,"
+               "\"x\":%.4f,\"y\":%.4f,\"w\":%.4f,\"h\":%.4f}",
+               i ? "," : "",
+               d.cls < (int)g_m.labels.size() ? g_m.labels[d.cls].c_str() : "?",
+               d.cls, d.conf, d.cx - d.w/2, d.cy - d.h/2, d.w, d.h);
+    }
+    printf("]}\n");
+    fflush(stdout);
+}
+
+/* per-class overlay palette (RGB) */
+static const int DET_COL[6][3] = {
+    {166,227,161}, {243,139,168}, {137,180,250}, {249,226,175}, {203,166,247}, {148,226,213},
+};
+
+static void fb_box_outline(float nx, float ny, float nw, float nh, const int col[3]){
+    int x = (int)(nx * FBW), y = (int)(ny * FBH);
+    int w = (int)(nw * FBW), h = (int)(nh * FBH);
+    const int t = 2;
+    fb_rect(x, y, w, t, col[0], col[1], col[2]);
+    fb_rect(x, y + h - t, w, t, col[0], col[1], col[2]);
+    fb_rect(x, y, t, h, col[0], col[1], col[2]);
+    fb_rect(x + w - t, y, t, h, col[0], col[1], col[2]);
+}
+
 /* ---- inference worker (latest-wins handoff, same scheme as nnacam.cpp) -------- */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cond = PTHREAD_COND_INITIALIZER;
@@ -385,6 +484,7 @@ static unsigned char *g_in = NULL;            /* m.w*m.h*3, latest balanced fram
 static int  g_in_ready = 0;
 static char g_label[96] = "...";
 static unsigned long g_infers = 0;
+static std::vector<Det> g_dets;               /* latest detections (under g_lock) */
 
 static void *infer_thread(void *arg){
     (void)arg;
@@ -399,15 +499,30 @@ static void *infer_thread(void *arg){
         pthread_mutex_unlock(&g_lock);
 
         double ms = 0;
-        if(!classify(local, probs, &ms)) continue;
-        int best = (int)(std::max_element(probs.begin(), probs.end()) - probs.begin());
-        int pct = (int)(probs[best] * 100.0f + 0.5f);
-        const char *nm = best < (int)g_m.labels.size() ? g_m.labels[best].c_str() : "?";
-        char buf[96]; snprintf(buf,sizeof buf,"%s %d%%", nm, pct);
-        print_result_json(probs, ms);
+        char buf[96];
+        std::vector<Det> dets;
+        if(g_m.task == "detection"){
+            if(!detect_forward(local, dets, &ms)) continue;
+            if(dets.empty())
+                snprintf(buf, sizeof buf, "no obj");
+            else
+                snprintf(buf, sizeof buf, "%s %d%%%s",
+                         dets[0].cls < (int)g_m.labels.size() ? g_m.labels[dets[0].cls].c_str() : "?",
+                         (int)(dets[0].conf * 100.0f + 0.5f),
+                         dets.size() > 1 ? " +" : "");
+            print_dets_json(dets, ms);
+        } else {
+            if(!classify(local, probs, &ms)) continue;
+            int best = (int)(std::max_element(probs.begin(), probs.end()) - probs.begin());
+            int pct = (int)(probs[best] * 100.0f + 0.5f);
+            const char *nm = best < (int)g_m.labels.size() ? g_m.labels[best].c_str() : "?";
+            snprintf(buf,sizeof buf,"%s %d%%", nm, pct);
+            print_result_json(probs, ms);
+        }
 
         pthread_mutex_lock(&g_lock);
         strncpy(g_label, buf, sizeof g_label-1); g_label[sizeof g_label-1]=0;
+        g_dets = dets;
         g_infers++;
         pthread_mutex_unlock(&g_lock);
     }
@@ -447,11 +562,21 @@ static int run_image_mode(const std::string& dir, const char *img_path){
         return 1;
     }
     fclose(f);
-    std::vector<float> probs; double ms = 0;
+    double ms = 0;
+    (void)dir;
+    if(g_m.task == "detection"){
+        std::vector<Det> dets;
+        if(!detect_forward(rgb.data(), dets, &ms)){
+            printf("{\"event\":\"error\",\"msg\":\"extract failed\"}\n"); return 1;
+        }
+        print_dets_json(dets, ms);
+        fflush(NULL);
+        _exit(0);
+    }
+    std::vector<float> probs;
     if(!classify(rgb.data(), probs, &ms)){
         printf("{\"event\":\"error\",\"msg\":\"extract failed\"}\n"); return 1;
     }
-    (void)dir;
     print_result_json(probs, ms);
     /* skip libc atexit teardown: AWNN's exit handlers segfault in ion frees
      * (phy2vir spam) once a model was loaded; our output is already flushed */
@@ -649,7 +774,25 @@ int main(int argc, char **argv){
         /* overlay the latest prediction (produced by the worker) */
         {
             char line[96];
-            pthread_mutex_lock(&g_lock); strncpy(line,g_label,sizeof line-1); line[sizeof line-1]=0; pthread_mutex_unlock(&g_lock);
+            std::vector<Det> dets;
+            pthread_mutex_lock(&g_lock);
+            strncpy(line,g_label,sizeof line-1); line[sizeof line-1]=0;
+            dets = g_dets;
+            pthread_mutex_unlock(&g_lock);
+            /* detection: bounding boxes — the panel shows the same centre square
+             * the net sees, so normalized coords map straight to fb pixels */
+            for(size_t di = 0; di < dets.size(); di++){
+                const Det& d = dets[di];
+                const int *col = DET_COL[d.cls % 6];
+                fb_box_outline(d.cx - d.w/2, d.cy - d.h/2, d.w, d.h, col);
+                char bl[48];
+                snprintf(bl, sizeof bl, "%s %d%%",
+                         d.cls < (int)g_m.labels.size() ? g_m.labels[d.cls].c_str() : "?",
+                         (int)(d.conf * 100.0f + 0.5f));
+                int bx = (int)((d.cx - d.w/2) * FBW) + 3;
+                int by = (int)((d.cy - d.h/2) * FBH) + 3;
+                fb_text(bx, by, bl, 1, col[0], col[1], col[2]);
+            }
             fb_text(4, 4, line, 2, 0,255,0);
         }
 

@@ -13,6 +13,10 @@ struct KbManifest {
     int w = 0, h = 0;
     float mean[3] = {0, 0, 0}, norm[3] = {0, 0, 0};
     std::vector<std::string> labels;
+    /* detection (YOLOv2 head); grid==0 means "not a detection pack" */
+    int grid = 0;
+    std::vector<float> anchors; /* flat (w,h) pairs in grid units */
+    float conf_threshold = 0.5f, nms_threshold = 0.45f;
 };
 
 // find "key" : <value> ; returns pointer past the colon or nullptr
@@ -41,6 +45,22 @@ static void mf_floats3(const std::string& s, const char* key, float out[3]){
         p = strchr(q, ',');
         if(!p && i < 2) return;
     }
+}
+static std::vector<float> mf_floatlist(const std::string& s, const char* key){
+    std::vector<float> v;
+    const char* p = mf_find(s, key); if(!p) return v;
+    p = strchr(p, '['); if(!p) return v;
+    const char* end = strchr(p, ']'); if(!end) return v;
+    char* q = nullptr;
+    p++;
+    while(p < end){
+        float f = strtof(p, &q);
+        if(q == p) break;
+        v.push_back(f);
+        p = strchr(q, ','); if(!p || p > end) break;
+        p++;
+    }
+    return v;
 }
 static std::vector<std::string> mf_strlist(const std::string& s, const char* key){
     std::vector<std::string> v;
@@ -71,5 +91,13 @@ static bool mf_load(const char* path, KbManifest& m){
     m.param = mf_str(s, "param"); m.bin = mf_str(s, "bin");
     m.labels_file = mf_str(s, "labels_file");
     m.labels = mf_strlist(s, "labels");
+    if(m.task == "detection"){
+        m.grid = (int)mf_num(s, "grid");
+        m.anchors = mf_floatlist(s, "anchors");
+        double ct = mf_num(s, "conf_threshold"), nt = mf_num(s, "nms_threshold");
+        if(ct > 0) m.conf_threshold = (float)ct;
+        if(nt > 0) m.nms_threshold = (float)nt;
+        if(m.grid <= 0 || m.anchors.size() < 2 || m.anchors.size() % 2) return false;
+    }
     return m.w > 0 && m.h > 0 && !m.param.empty() && !m.in_blob.empty();
 }

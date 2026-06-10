@@ -219,6 +219,7 @@ name = "kbdk-convert"
 version = "0.1.0"
 source = { editable = "kbdk-convert" }
 dependencies = [
+    { name = "kbdk-train" },
     { name = "ncnn" },
     { name = "numpy" },
     { name = "pillow" },
@@ -228,6 +229,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "kbdk-train", editable = "kbdk-train" },
     { name = "ncnn" },
     { name = "numpy" },
     { name = "pillow" },

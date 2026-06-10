@@ -36,8 +36,13 @@ board's stock models (ImageNet ResNet-18 via the vendor AWNN runtime) and can
 shot or burst) — point the camera at your objects, collect a dataset, train,
 deploy, all without leaving the app.
 
-Train = PyTorch MPS (MobileNetV2/ResNet18 transfer learning, ImageFolder datasets).
-Convert = pnnx → ncnn → int8 (calibrated on your dataset, host-verified parity).
+Train = PyTorch MPS — classification (MobileNetV2/ResNet18 transfer learning,
+ImageFolder datasets) **and object detection** (`--task detection`: YOLOv2-slim =
+MobileNetV2 + YOLO head, YOLO/Darknet-format datasets as exported by
+labelImg/Roboflow; anchors auto-k-means'd). Convert = pnnx → ncnn → int8
+(calibrated on your dataset, host-verified parity — box-level for detection).
+Detection runs live on the board with bounding boxes + labels drawn on the
+panel and overlaid on the UI's camera preview.
 Deploy = md5-verified push over the board's **ADB USB gadget** (~6 MB/s; serial
 console fallback built in). Run = `kbrun`, statically-linked vanilla **ncnn**
 (the vendor's AWNN runtime cannot run self-converted models — see CLAUDE.md),
