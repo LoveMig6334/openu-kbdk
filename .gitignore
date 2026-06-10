@@ -17,3 +17,4 @@ models/toy3/
 examples/toy-dataset/
 py/.venv/
 __pycache__/
+models/

@@ -60,6 +60,28 @@ fn dataset_summary(dir: &std::path::Path) -> Option<String> {
     Some(format!("{} classes, {n} images", classes.len()))
 }
 
+/// Kick off training with the current fields (the Train button's action; also
+/// driven by the KBDK_AUTOTRAIN test hook).
+pub fn start(app: &mut KbdkApp) {
+    app.training = true;
+    app.epoch_loss.clear();
+    app.epoch_acc.clear();
+    app.train_status = "starting (first run downloads torch weights)…".into();
+    let root = &app.workers.repo_root;
+    app.workers.train(vec![
+        "--data".into(),
+        root.join(&app.f.data_dir).display().to_string(),
+        "--out".into(),
+        root.join(&app.f.model_out).display().to_string(),
+        "--backbone".into(),
+        app.f.backbone.clone(),
+        "--epochs".into(),
+        app.f.epochs.to_string(),
+        "--size".into(),
+        app.f.size.to_string(),
+    ]);
+}
+
 pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
     ui.heading("Fine-tune a classifier");
     ui.add_space(6.0);
@@ -117,23 +139,7 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
             .add(egui::Button::new(egui::RichText::new("▶ Train").color(theme::CRUST)).fill(theme::GREEN))
             .clicked()
         {
-            app.training = true;
-            app.epoch_loss.clear();
-            app.epoch_acc.clear();
-            app.train_status = "starting (first run downloads torch weights)…".into();
-            let root = &app.workers.repo_root;
-            app.workers.train(vec![
-                "--data".into(),
-                root.join(&app.f.data_dir).display().to_string(),
-                "--out".into(),
-                root.join(&app.f.model_out).display().to_string(),
-                "--backbone".into(),
-                app.f.backbone.clone(),
-                "--epochs".into(),
-                app.f.epochs.to_string(),
-                "--size".into(),
-                app.f.size.to_string(),
-            ]);
+            start(app);
         }
         ui.label(egui::RichText::new(&app.train_status).color(theme::SUBTEXT));
     });

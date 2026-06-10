@@ -27,6 +27,11 @@ uv run --with pillow --with numpy python examples/make_toy_dataset.py
 ./target/debug/kbdk log && ./target/debug/kbdk stop
 ```
 
+Prefer a GUI? `cargo run -p kbdk-ui` opens the desktop app (egui, Catppuccin
+Mocha): pick a dataset, watch live loss/accuracy curves while training on MPS,
+convert with an int8-parity check, then deploy and watch the board's live
+classifications stream in.
+
 Train = PyTorch MPS (MobileNetV2/ResNet18 transfer learning, ImageFolder datasets).
 Convert = pnnx → ncnn → int8 (calibrated on your dataset, host-verified parity).
 Deploy = md5-verified push over the board's **ADB USB gadget** (~6 MB/s; serial

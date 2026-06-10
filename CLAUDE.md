@@ -48,7 +48,7 @@ int8 ncnn pack → `kbdk deploy/run` → 100% correct on held-out images on the 
 (470 ms/inf @224), live camera + label overlay streaming JSON results.
 
 ```sh
-cargo build                       # crates/kbdk-core (lib) + crates/kbdk-cli (kbdk)
+cargo build                       # crates/kbdk-core (lib) + kbdk-cli (kbdk) + kbdk-ui (egui app)
 sh board/ncnn/build.sh            # one-time: pinned ncnn -> board lib + host quantize tools
 make kbrun                        # board runner (static libncnn + dlopen'd MPP camera)
 (cd py && uv sync)                # Python workspace: kbdk-train + kbdk-convert
@@ -60,7 +60,20 @@ kbdk convert --model models/m.pt --data DIR --name NAME   # -> packs/NAME (int8 
 kbdk deploy packs/NAME            # md5-verified push to /mnt/UDISK/kbdk/NAME + runner
 kbdk run NAME [--frames N]        # live camera + overlay; kbdk log / kbdk stop
 KBDK_HW=1 cargo test -p kbdk-core # hardware integration tests (board attached)
+cargo run -p kbdk-ui              # desktop app: Train/Convert/Deploy tabs (egui, Catppuccin Mocha)
 ```
+
+`kbdk-ui` notes: all blocking work (uv subprocesses via `kbdk-core::pipeline`,
+board I/O, device polling) runs on worker threads reporting over mpsc; the UI
+thread only renders. Field state persists via eframe Storage. Verification hooks
+(used by automated checks, harmless otherwise): `--screenshot PATH` (self-captures
+the viewport — no macOS screen-recording permission needed), `--tab train|convert|deploy`,
+`KBDK_SHOT_DELAY=secs`, `KBDK_AUTOTRAIN=1`, `KBDK_AUTOCONVERT=1`, `KBDK_POLL=1`
+(start the board log poller as if Run was clicked). egui 0.34 gotchas already
+handled: `App::ui` + `Panel::*::show_inside` (not `update`/`show`), egui_plot 0.35
+pairs with egui 0.34, persistence needs the eframe `persistence` feature, and
+`TextEdit` inside `Grid` collapses to minimum width (use horizontal rows +
+`add_sized` labels instead — see convert_tab.rs).
 
 Hard-won facts baked into kbdk (don't re-learn these):
 - **AWNN can't run vanilla ncnn**: `libmaix_nn.so` loads a vanilla .param/.bin without

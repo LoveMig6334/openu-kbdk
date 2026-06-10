@@ -75,6 +75,8 @@ pub struct KbdkApp {
     pub board_note: String,
 
     frame_count: u32,
+    shot_requested: bool,
+    started: std::time::Instant,
 }
 
 impl KbdkApp {
@@ -121,8 +123,40 @@ impl KbdkApp {
             last_result: None,
             board_note: String::new(),
             frame_count: 0,
+            shot_requested: false,
+            started: std::time::Instant::now(),
         };
         app.rescan_packs();
+
+        // test hooks: --tab <train|convert|deploy> forces a tab;
+        // KBDK_POLL=1 starts the board log poller as if Run had been clicked.
+        if let Some(tab) = std::env::args().skip_while(|a| a != "--tab").nth(1) {
+            app.f.tab = match tab.as_str() {
+                "convert" => Tab::Convert,
+                "deploy" => Tab::Deploy,
+                _ => Tab::Train,
+            };
+        }
+        if std::env::var("KBDK_POLL").is_ok() {
+            app.running = true;
+            app.workers.run_pack_poll_only();
+        }
+        if std::env::var("KBDK_AUTOTRAIN").is_ok() {
+            app.f.tab = Tab::Train;
+            app.f.data_dir = "examples/toy-dataset".into();
+            app.f.model_out = "models/uitest/model.pt".into();
+            app.f.epochs = 4;
+            app.f.size = 64;
+            train_tab::start(&mut app);
+        }
+        if std::env::var("KBDK_AUTOCONVERT").is_ok() {
+            app.f.tab = Tab::Convert;
+            app.f.data_dir = "examples/toy-dataset".into();
+            app.f.pack_name = "uitest".into();
+            app.f.size = 64;
+            let m = convert_tab::default_model(&app);
+            convert_tab::start(&mut app, m);
+        }
         app
     }
 
@@ -180,15 +214,21 @@ impl KbdkApp {
         }
     }
 
-    /// `kbdk-ui --screenshot PATH`: render a few frames, save a PNG, exit.
-    /// Used for automated UI verification (screen capture needs no OS permission
-    /// because the app photographs its own viewport).
+    /// `kbdk-ui --screenshot PATH`: render a few frames (or `KBDK_SHOT_DELAY` seconds),
+    /// save a PNG, exit. Used for automated UI verification (no OS screen-capture
+    /// permission needed because the app photographs its own viewport).
     fn screenshot_tick(&mut self, ctx: &egui::Context) {
         let Some(path) = std::env::args().skip_while(|a| a != "--screenshot").nth(1) else {
             return;
         };
+        let delay: f64 = std::env::var("KBDK_SHOT_DELAY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
         self.frame_count += 1;
-        if self.frame_count == 10 {
+        let due = self.started.elapsed().as_secs_f64() >= delay;
+        if self.frame_count >= 10 && due && !self.shot_requested {
+            self.shot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
         let shot = ctx.input(|i| {

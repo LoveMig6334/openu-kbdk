@@ -139,6 +139,11 @@ impl Workers {
         });
     }
 
+    /// Test hook: start only the log poller (board runner already started externally).
+    pub fn run_pack_poll_only(&self) {
+        self.start_log_poller();
+    }
+
     /// While running: every 2 s pull the last result JSON-line from /tmp/kbrun.log.
     fn start_log_poller(&self) {
         self.polling.store(true, Ordering::Relaxed);
