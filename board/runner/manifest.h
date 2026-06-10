@@ -13,6 +13,9 @@ struct KbManifest {
     int w = 0, h = 0;
     float mean[3] = {0, 0, 0}, norm[3] = {0, 0, 0};
     std::vector<std::string> labels;
+    /* nvdla runtime (runtime == "nvdla"): logits dequant + cube sizes */
+    float logit_scale = 0;
+    int nv_in_size = 0, nv_out_c = 0;
     /* detection (YOLOv2 head); grid==0 means "not a detection pack" */
     int grid = 0;
     std::vector<float> anchors; /* flat (w,h) pairs in grid units */
@@ -91,6 +94,12 @@ static bool mf_load(const char* path, KbManifest& m){
     m.param = mf_str(s, "param"); m.bin = mf_str(s, "bin");
     m.labels_file = mf_str(s, "labels_file");
     m.labels = mf_strlist(s, "labels");
+    if(m.runtime == "nvdla"){
+        m.logit_scale = (float)mf_num(s, "logit_scale");
+        m.nv_in_size = (int)mf_num(s, "nv_in_size");
+        m.nv_out_c = (int)mf_num(s, "nv_out_c");
+        if(m.logit_scale <= 0 || m.nv_in_size <= 0 || m.nv_out_c <= 0) return false;
+    }
     if(m.task == "detection"){
         m.grid = (int)mf_num(s, "grid");
         m.anchors = mf_floatlist(s, "anchors");

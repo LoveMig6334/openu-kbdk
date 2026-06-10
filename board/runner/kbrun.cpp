@@ -278,6 +278,7 @@ static void nv21_to_rgb_in(const uint8_t *Y, const uint8_t *VU, int W, int H,
 static KbManifest g_m;
 static ncnn::Net g_net;
 static bool g_awnn_engine = false;
+static bool g_nvdla_engine = false;
 static libmaix_nn_t *g_awnn = NULL;
 static unsigned char *g_awnn_qbuf = NULL;
 static float *g_awnn_out = NULL;
@@ -326,6 +327,84 @@ static bool awnn_init(const std::string& dir){
     return true;
 }
 
+/* ---- NVDLA engine: the GPL nna_runner as a child process ---------------------- */
+/* kbrun stays MIT; everything that links third_party/v831-npu lives in the
+ * separate /tmp/nna_runner executable (GPLv3). The two talk only through a
+ * pipe pair ("go\n" per frame / one JSON line back) and two tmpfs files
+ * (packed int8 input cube in, raw logit cube out). The child keeps the NPU
+ * mapped and the weights resident, so per-frame cost is just input+forward. */
+#define NV_RUNNER "/tmp/nna_runner"
+#define NV_IN  "/tmp/kbrun_nv_in.bin"
+#define NV_OUT "/tmp/kbrun_nv_out.bin"
+static FILE *g_nv_to = NULL, *g_nv_from = NULL;
+static unsigned char *g_nv_inbuf = NULL;   /* 8ch-padded feature cube, w*h*8 */
+
+static bool nvdla_init(const std::string& dir){
+    std::string job = model_path(dir, g_m.param);
+    if((size_t)g_m.nv_in_size != (size_t)g_m.w * g_m.h * 8){
+        fprintf(stderr, "nvdla: nv_in_size %d != w*h*8\n", g_m.nv_in_size);
+        return false;
+    }
+    int to[2], from[2];
+    if(pipe(to) || pipe(from)) return false;
+    pid_t p = fork();
+    if(p < 0) return false;
+    if(p == 0){
+        dup2(to[0], 0); dup2(from[1], 1);
+        close(to[0]); close(to[1]); close(from[0]); close(from[1]);
+        execl(NV_RUNNER, NV_RUNNER, job.c_str(), NV_IN, NV_OUT, "serve", (char*)NULL);
+        _exit(127);
+    }
+    close(to[0]); close(from[1]);
+    g_nv_to = fdopen(to[1], "w");
+    g_nv_from = fdopen(from[0], "r");
+    if(!g_nv_to || !g_nv_from) return false;
+    setvbuf(g_nv_to, NULL, _IONBF, 0);
+    char line[256];
+    while(fgets(line, sizeof line, g_nv_from)){
+        if(strstr(line, "\"loaded\"")){
+            g_nv_inbuf = (unsigned char*)calloc((size_t)g_m.w * g_m.h, 8);
+            return g_nv_inbuf != NULL;
+        }
+        if(strstr(line, "\"error\"")){ fprintf(stderr, "nna_runner: %s", line); return false; }
+    }
+    fprintf(stderr, "nna_runner exited during init (pushed? chmod +x?)\n");
+    return false;
+}
+
+/* one forward on interleaved RGB via the NPU child; fills dequantized logits */
+static bool nvdla_forward(const unsigned char *rgb, std::vector<float>& logits){
+    size_t npix = (size_t)g_m.w * g_m.h;
+    for(size_t i = 0; i < npix; i++){
+        unsigned char *d = g_nv_inbuf + i * 8;   /* ch 3..7 stay zero (calloc) */
+        d[0] = (unsigned char)((int)rgb[i*3+0] - 128);
+        d[1] = (unsigned char)((int)rgb[i*3+1] - 128);
+        d[2] = (unsigned char)((int)rgb[i*3+2] - 128);
+    }
+    FILE *f = fopen(NV_IN, "wb");
+    if(!f) return false;
+    fwrite(g_nv_inbuf, 1, npix * 8, f);
+    fclose(f);
+    fputs("go\n", g_nv_to);
+    char line[256];
+    while(fgets(line, sizeof line, g_nv_from)){
+        if(strstr(line, "\"infer\"")) break;
+        if(strstr(line, "\"error\"")) return false;
+    }
+    if(feof(g_nv_from)) return false;            /* child died */
+    f = fopen(NV_OUT, "rb");
+    if(!f) return false;
+    /* logits are 1x1 spatial: channel c sits at byte c (8-padded surfaces are
+     * contiguous when w==h==1) */
+    signed char q[256];
+    int n = (int)fread(q, 1, sizeof q, f);
+    fclose(f);
+    if(n < g_m.nv_out_c) return false;
+    logits.resize(g_m.nv_out_c);
+    for(int i = 0; i < g_m.nv_out_c; i++) logits[i] = (float)q[i] / g_m.logit_scale;
+    return true;
+}
+
 static void softmax_in_place(std::vector<float>& v){
     float mx = *std::max_element(v.begin(), v.end()); float sum = 0;
     for(auto& x : v){ x = expf(x - mx); sum += x; }
@@ -335,6 +414,12 @@ static void softmax_in_place(std::vector<float>& v){
 /* run one forward on interleaved RGB (in_w*in_h*3), return softmax probs */
 static bool classify(const unsigned char *rgb, std::vector<float>& probs, double *ms){
     double t0 = now_ms();
+    if(g_nvdla_engine){
+        if(!nvdla_forward(rgb, probs)) return false;
+        if(ms) *ms = now_ms() - t0;
+        softmax_in_place(probs);
+        return true;
+    }
     if(g_awnn_engine){
         libmaix_nn_layer_t in; memset(&in, 0, sizeof in);
         in.w = g_m.w; in.h = g_m.h; in.c = 3;
@@ -701,7 +786,17 @@ int main(int argc, char **argv){
     g_nclass = (int)g_m.labels.size();
 
     g_awnn_engine = (g_m.runtime == "awnn");
-    if(g_awnn_engine){
+    g_nvdla_engine = (g_m.runtime == "nvdla");
+    if(g_nvdla_engine){
+        if(g_m.task == "detection"){
+            printf("{\"event\":\"error\",\"msg\":\"nvdla detection not supported yet\"}\n");
+            return 1;
+        }
+        if(!nvdla_init(dir)){
+            printf("{\"event\":\"error\",\"msg\":\"nvdla engine init failed (nna_runner pushed?)\"}\n");
+            return 1;
+        }
+    } else if(g_awnn_engine){
         if(g_nclass == 0){
             printf("{\"event\":\"error\",\"msg\":\"awnn pack needs labels (class count)\"}\n");
             return 1;

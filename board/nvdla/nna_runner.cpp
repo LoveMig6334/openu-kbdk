@@ -21,9 +21,14 @@
  * it links third_party/v831-npu. It is deliberately a SEPARATE executable from
  * the MIT kbrun; they talk through the same pack/manifest + JSON-lines protocol.
  *
- * Usage: nna_runner JOB.nvj IN.bin OUT.bin [repeat]
+ * Usage: nna_runner JOB.nvj IN.bin OUT.bin [repeat|serve]
  *        (IN.bin = packed int8 feature cube loaded at the job's in_offset
  *         each iteration; "-" if the input already ships in the job blobs)
+ *
+ * "serve" keeps the NPU set up and loops on stdin: each "go" line re-reads
+ * IN.bin, runs the net, writes OUT.bin and prints {"event":"infer","ms":..}.
+ * EOF or "q" exits. This is how the MIT kbrun drives the NPU: a separate GPL
+ * process, talking only through pipes + tmpfs files (license boundary).
  *
  * Executes an "NVJ1" job file (emitted by py kbdk_convert.nvdla): one ION
  * allocation, blobs preloaded at fixed offsets, then per layer a fused
@@ -250,8 +255,13 @@ int main(int argc, char **argv) {
     }
     const char *in_path = strcmp(argv[2], "-") ? argv[2] : NULL;
     const char *out_path = argv[3];
-    int repeat = argc > 4 ? atoi(argv[4]) : 1;
+    int serve = argc > 4 && !strcmp(argv[4], "serve");
+    int repeat = (!serve && argc > 4) ? atoi(argv[4]) : 1;
     if (repeat < 1) repeat = 1;
+    if (serve && !in_path) {
+        printf("{\"event\":\"error\",\"msg\":\"serve mode needs an input file\"}\n");
+        return 2;
+    }
 
     FILE *f = fopen(argv[1], "rb");
     if (!f) { printf("{\"event\":\"error\",\"msg\":\"open job failed\"}\n"); return 1; }
@@ -279,13 +289,16 @@ int main(int argc, char **argv) {
     uint8_t *in_data = NULL;
     if (in_path) {
         if (!in_size) { printf("{\"event\":\"error\",\"msg\":\"job has no input region\"}\n"); return 1; }
-        FILE *fi = fopen(in_path, "rb");
         in_data = (uint8_t *)malloc(in_size);
-        if (!fi || fread(in_data, 1, in_size, fi) != in_size) {
-            printf("{\"event\":\"error\",\"msg\":\"read input failed (want %u bytes)\"}\n", in_size);
-            return 1;
+        /* serve mode reads the file fresh per "go"; one-shot reads it now */
+        if (!serve) {
+            FILE *fi = fopen(in_path, "rb");
+            if (!fi || fread(in_data, 1, in_size, fi) != in_size) {
+                printf("{\"event\":\"error\",\"msg\":\"read input failed (want %u bytes)\"}\n", in_size);
+                return 1;
+            }
+            fclose(fi);
         }
-        fclose(fi);
     }
 
     signal(SIGALRM, on_alarm);
@@ -310,6 +323,41 @@ int main(int argc, char **argv) {
     }
 
     printf("{\"event\":\"loaded\",\"layers\":%u,\"ion\":%u}\n", n_layers, ion_size);
+
+    if (serve) {
+        char line[64];
+        uint8_t *out = (uint8_t *)malloc(out_size);
+        while (fgets(line, sizeof line, stdin)) {
+            if (line[0] == 'q') break;
+            if (line[0] != 'g') continue;
+            double t0 = now_ms();
+            FILE *fi = fopen(in_path, "rb");
+            if (!fi || fread(in_data, 1, in_size, fi) != in_size) {
+                if (fi) fclose(fi);
+                printf("{\"event\":\"error\",\"msg\":\"input read failed\"}\n");
+                continue;
+            }
+            fclose(fi);
+            sunxi_ion_loadin((char *)in_data, in_size, (uint32_t)(uintptr_t)gp_paddr + in_off);
+            int err = 0;
+            for (uint32_t i = 0; i < n_layers && !err; i++) {
+                alarm(10);
+                err = run_layer(&layers[i]);
+                alarm(0);
+            }
+            if (err) { printf("{\"event\":\"error\",\"msg\":\"layer failed\"}\n"); continue; }
+            sunxi_ion_loadout((uint32_t)(uintptr_t)gp_paddr + out_off, out_size, (char *)out);
+            FILE *fo = fopen(out_path, "wb");
+            if (fo) { fwrite(out, 1, out_size, fo); fclose(fo); }
+            printf("{\"event\":\"infer\",\"ms\":%.1f}\n", now_ms() - t0);
+        }
+        free(out);
+        sunxi_ion_alloc_free();
+        sunxi_ion_alloc_close();
+        xreg_close();
+        nna_off();
+        return 0;
+    }
 
     double t_all0 = now_ms();
     double lms[64];
