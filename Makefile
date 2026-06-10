@@ -27,7 +27,7 @@ UAI := ./bin/uai
 
 .PHONY: all uai hello fbtest audio v4l2cap v4l2probe camdiag camread cammpp campreview camcc nncls clean \
         deploy deploy-fb deploy-audio deploy-cammpp deploy-preview preview-start preview-stop \
-        deploy-camcc camcc-start camcc-stop deploy-nncls nnaprobe deploy-nnaprobe \
+        deploy-camcc camcc-start camcc-stop deploy-nncls nnload nnaprobe deploy-nnaprobe \
         nna-cifar10 deploy-nna-cifar10 nnacam deploy-nnacam monitor term
 all: uai hello fbtest audio
 
@@ -81,6 +81,12 @@ bin/camcc: src/camcc.c | bin
 # NPU CNN inference: dlopen the board's libmaix_nn.so (AWNN), run forward
 nncls: bin/nncls
 bin/nncls: src/nncls.c | bin
+	$(CROSS) $(CROSSFLAGS) -Ivendor/libmaix -Wl,--export-dynamic -o $@ $< -ldl
+
+# Generic AWNN model-load probe: which .param/.bin will libmaix_nn actually load+forward?
+# (Proved 2026-06-10 that vanilla ncnn files "load" but forward to saturated int8 garbage.)
+nnload: bin/nnload
+bin/nnload: src/nnload.c | bin
 	$(CROSS) $(CROSSFLAGS) -Ivendor/libmaix -Wl,--export-dynamic -o $@ $< -ldl
 
 # NPU userspace bring-up: read-only probe of the NVDLA regs via /dev/mem (no driver)
