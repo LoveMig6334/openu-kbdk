@@ -33,6 +33,9 @@
 #include <sys/mman.h>
 #include <linux/videodev2.h>
 #include <linux/fb.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <poll.h>
 
 #include <algorithm>
 #include <string>
@@ -531,17 +534,29 @@ static void *infer_thread(void *arg){
 }
 
 /* ---- preview frame export (host UI shows the camera) -------------------------- */
-/* Every few frames the balanced 240x240 RGB preview is dropped into tmpfs with a
- * tiny dims header; the host pulls it over adb and shows it in kbdk-ui. The
- * write-then-rename keeps pulls from seeing a half-written frame. */
+/* The balanced 240x240 RGB preview goes two ways: into an in-memory buffer the
+ * TCP frame server (below) serves over adb-forward (the fast path, ~10-15 fps),
+ * and every few frames into a tmpfs file the host can adb-pull (the fallback for
+ * hosts that predate the server). The write-then-rename keeps pulls from seeing
+ * a half-written frame. */
 #define PREV_W 240
 #define PREV_H 240
 #define PREV_PATH "/tmp/kbrun_frame.rgb"
 #define PREV_TMP  "/tmp/.kbrun_frame.tmp"
+#define FRAME_PORT 18902
 
-static void write_preview(const uint8_t *Y, const uint8_t *VU, int W, int H){
+static pthread_mutex_t g_prev_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char g_prev[PREV_W * PREV_H * 3];   /* latest preview, under g_prev_lock */
+static unsigned long g_prev_seq = 0;                /* 0 = no frame yet */
+
+static void write_preview(const uint8_t *Y, const uint8_t *VU, int W, int H, int to_file){
     static unsigned char buf[PREV_W * PREV_H * 3];
     nv21_to_rgb_in(Y, VU, W, H, buf, PREV_W, PREV_H);
+    pthread_mutex_lock(&g_prev_lock);
+    memcpy(g_prev, buf, sizeof buf);
+    g_prev_seq++;
+    pthread_mutex_unlock(&g_prev_lock);
+    if(!to_file) return;
     FILE *f = fopen(PREV_TMP, "wb");
     if(!f) return;
     unsigned char hdr[8] = {'K','B','F','1',
@@ -550,6 +565,64 @@ static void write_preview(const uint8_t *Y, const uint8_t *VU, int W, int H){
     fwrite(buf, 1, sizeof buf, f);
     fclose(f);
     rename(PREV_TMP, PREV_PATH);
+}
+
+/* TCP frame server: one-shot per connection — wait (briefly) for a preview frame
+ * newer than the last one served, send "KBF1" + dims + RGB, close. The wait is
+ * what paces a tight host fetch loop at the camera's preview cadence. No
+ * pthread_cond_timedwait here: the musl-1.2 cross headers redirect it to
+ * __pthread_cond_timedwait_time64, which the board's musl 1.1.16 lacks — a
+ * usleep poll avoids the trap (same reason the accept gate is poll(), not
+ * select()). */
+static void *frame_server(void *arg){
+    (void)arg;
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if(ls < 0) return NULL;
+    int one = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a; memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons(FRAME_PORT);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if(bind(ls, (struct sockaddr*)&a, sizeof a) < 0 || listen(ls, 2) < 0){
+        fprintf(stderr, "frame server: bind/listen :%d failed\n", FRAME_PORT);
+        close(ls);
+        return NULL;
+    }
+    static unsigned char out[8 + sizeof g_prev];
+    memcpy(out, "KBF1", 4);
+    out[4] = PREV_W & 0xFF; out[5] = PREV_W >> 8;
+    out[6] = PREV_H & 0xFF; out[7] = PREV_H >> 8;
+    unsigned long sent_seq = 0;
+    while(!g_stop){
+        struct pollfd pf = { ls, POLLIN, 0 };
+        if(poll(&pf, 1, 500) <= 0) continue;
+        int c = accept(ls, NULL, NULL);
+        if(c < 0) continue;
+        for(int waited = 0; waited < 250 && !g_stop; waited += 10){
+            pthread_mutex_lock(&g_prev_lock);
+            unsigned long s = g_prev_seq;
+            pthread_mutex_unlock(&g_prev_lock);
+            if(s && s != sent_seq) break;
+            usleep(10000);
+        }
+        pthread_mutex_lock(&g_prev_lock);
+        unsigned long s = g_prev_seq;
+        if(s) memcpy(out + 8, g_prev, sizeof g_prev);
+        pthread_mutex_unlock(&g_prev_lock);
+        if(s){
+            sent_seq = s;
+            size_t off = 0;
+            while(off < sizeof out){
+                ssize_t n = send(c, out + off, sizeof out - off, MSG_NOSIGNAL);
+                if(n <= 0) break;
+                off += (size_t)n;
+            }
+        }
+        close(c);
+    }
+    close(ls);
+    return NULL;
 }
 
 /* ---- one-shot file mode (host parity verification) ---------------------------- */
@@ -662,6 +735,7 @@ int main(int argc, char **argv){
 
     signal(SIGTERM,on_stop); signal(SIGINT,on_stop);
     signal(SIGHUP,SIG_IGN);                             /* adbd HUPs on session close */
+    signal(SIGPIPE,SIG_IGN);                            /* frame client may vanish mid-send */
     signal(SIGALRM,on_alarm); alarm(30);                /* guards setup */
 
     int fbfd = open("/dev/fb0", O_RDWR);
@@ -699,7 +773,7 @@ int main(int argc, char **argv){
     size_t insz = (size_t)g_m.w * g_m.h * 3;
     unsigned char *rgb = (unsigned char*)malloc(insz);
     g_in = (unsigned char*)malloc(insz);
-    pthread_t it;
+    pthread_t it, ft;
     int xoff, yoff;
     unsigned long frames=0, skipped=0;
 
@@ -714,6 +788,7 @@ int main(int argc, char **argv){
     yoff = (H-FBH)/2; if (yoff<0) yoff=0;
 
     pthread_create(&it,NULL,infer_thread,NULL);
+    pthread_create(&ft,NULL,frame_server,NULL);   /* after daemonize + camera up */
 
     alarm(0);
     fprintf(stderr, "LIVE: camera on panel + ncnn '%s' overlay (%dx%d). SIGTERM to stop.\n",
@@ -740,7 +815,11 @@ int main(int argc, char **argv){
 
         update_awb(Y, VU, fr->mWidth, fr->mHeight);
 
-        if (k % 3 == 0) write_preview(Y, VU, fr->mWidth, fr->mHeight);
+        /* TCP buffer every 3rd frame (~10 fps at the camera's 30 — more starves
+         * the inference thread: at 15 fps the adbd transfer alone roughly doubles
+         * forward() wall time on the single A7); tmpfs fallback file every 6th
+         * (the pull path only samples ~2.5/s anyway) */
+        if (k % 3 == 0) write_preview(Y, VU, fr->mWidth, fr->mHeight, (k % 6) == 0);
 
         /* hand the latest frame to the inference worker (non-blocking; latest wins) */
         nv21_to_rgb_in(Y, VU, fr->mWidth, fr->mHeight, rgb, g_m.w, g_m.h);
@@ -812,6 +891,7 @@ int main(int argc, char **argv){
     g_stop = 1;
     pthread_mutex_lock(&g_lock); pthread_cond_broadcast(&g_cond); pthread_mutex_unlock(&g_lock);
     pthread_join(it,NULL);
+    pthread_join(ft,NULL);   /* poll() gate notices g_stop within 500 ms */
 
 out:
     if (vch)  { VI_DisableVirChn(dev,chn); VI_DestoryVirChn(dev,chn); }

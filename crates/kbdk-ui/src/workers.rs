@@ -3,6 +3,7 @@
 //! thread only renders.
 
 use kbdk_core::adb::AdbTransport;
+use kbdk_core::frames;
 use kbdk_core::pipeline::{self, PyEvent};
 use kbdk_core::transport::Transport;
 use kbdk_core::{deploy, discover};
@@ -160,20 +161,46 @@ impl Workers {
         self.start_log_poller();
     }
 
-    /// While running: pull the camera preview frame (every ~400 ms) and the last
-    /// result JSON-line (every ~2 s) from the board.
+    /// While running: stream camera preview frames — TCP via adb-forward when the
+    /// board's kbrun serves them (~10-15 fps), else adb-pull of the tmpfs file
+    /// (~2.5 fps) — plus the last result JSON-line every ~2 s.
     fn start_log_poller(&self) {
         self.polling.store(true, Ordering::Relaxed);
         let polling = self.polling.clone();
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
+            use std::time::{Duration, Instant};
             let t = AdbTransport::new(None);
             let frame_local = std::env::temp_dir().join(format!("kbdk_frame_{}.rgb", std::process::id()));
+            // The forward is set up once; whether anything answers on it depends
+            // on the kbrun running board-side, so probe per-fetch and fall back.
+            let stream = frames::FrameStream::connect(None, frames::FRAME_PORT).ok();
+            let mut tcp_fail: u32 = 0; // consecutive connect/read failures
+            let mut tcp_seen = false;
             let mut tick: u32 = 0;
+            let mut last_log = Instant::now() - Duration::from_secs(10);
             while polling.load(Ordering::Relaxed) {
-                // camera preview every tick
-                if t.pull("/tmp/kbrun_frame.rgb", &frame_local).is_ok() {
+                let mut used_tcp = false;
+                // TCP fast path: keep trying through kbrun's startup (~6 s of
+                // failed ticks), then only re-probe occasionally (~every 10 s).
+                if let Some(fs) = stream.as_ref().filter(|_| tcp_fail < 15 || tick % 25 == 0) {
+                    match fs.fetch(Duration::from_secs(2)) {
+                        Ok(f) => {
+                            tcp_fail = 0;
+                            used_tcp = true;
+                            if !tcp_seen {
+                                tcp_seen = true;
+                                let _ = tx.send(Msg::BoardNote("frame feed: TCP".into()));
+                            }
+                            let _ = tx.send(Msg::BoardFrame { w: f.w, h: f.h, rgb: f.rgb });
+                            ctx.request_repaint();
+                        }
+                        Err(_) => tcp_fail += 1,
+                    }
+                }
+                // fallback: pull the tmpfs frame file
+                if !used_tcp && t.pull("/tmp/kbrun_frame.rgb", &frame_local).is_ok() {
                     if let Ok(data) = std::fs::read(&frame_local) {
                         if let Some((w, h, rgb)) = parse_preview(&data) {
                             let _ = tx.send(Msg::BoardFrame { w, h, rgb });
@@ -181,8 +208,9 @@ impl Workers {
                         }
                     }
                 }
-                // result line every 5th tick (~2 s)
-                if tick % 5 == 0 {
+                // result line every ~2 s
+                if last_log.elapsed() >= Duration::from_secs(2) {
+                    last_log = Instant::now();
                     match t.exec("tail -n 3 /tmp/kbrun.log 2>/dev/null; true", 15) {
                         Ok(r) => {
                             for line in r.output.lines().rev() {
@@ -202,7 +230,9 @@ impl Workers {
                     }
                 }
                 tick += 1;
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                // the TCP server already paces us (it waits for a fresh frame);
+                // the pull path keeps its old cadence
+                std::thread::sleep(Duration::from_millis(if used_tcp { 5 } else { 400 }));
             }
             let _ = std::fs::remove_file(&frame_local);
         });
