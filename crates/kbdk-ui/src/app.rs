@@ -79,6 +79,9 @@ pub struct KbdkApp {
     pub board_note: String,
     pub cam_tex: Option<egui::TextureHandle>,
 
+    /// arrival times of recent board frames, for the preview fps readout
+    pub frame_times: std::collections::VecDeque<std::time::Instant>,
+
     // dataset capture (from the live board camera)
     pub last_frame: Option<(usize, usize, Vec<u8>)>,
     pub burst: bool,
@@ -134,6 +137,7 @@ impl KbdkApp {
             last_result: None,
             board_note: String::new(),
             cam_tex: None,
+            frame_times: std::collections::VecDeque::new(),
             last_frame: None,
             burst: false,
             captured_n: 0,
@@ -280,6 +284,10 @@ impl KbdkApp {
                         }
                     }
                     self.last_frame = Some((w, h, rgb));
+                    self.frame_times.push_back(std::time::Instant::now());
+                    while self.frame_times.len() > 30 {
+                        self.frame_times.pop_front();
+                    }
                     if self.burst {
                         self.save_capture();
                     }

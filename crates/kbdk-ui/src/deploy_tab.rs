@@ -244,7 +244,19 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
                                 );
                                 draw_boxes_overlay(ui, resp.rect, &app.last_result);
                             }
-                            ui.colored_label(theme::SUBTEXT, "board camera (AWB preview)");
+                            // fps over the recent frame-arrival window (TCP feed
+                            // ~10-15, adb-pull fallback ~2.5)
+                            let fps = match (app.frame_times.front(), app.frame_times.back()) {
+                                (Some(a), Some(b)) if app.frame_times.len() > 1 => {
+                                    let dt = b.duration_since(*a).as_secs_f32();
+                                    if dt > 0.0 { (app.frame_times.len() - 1) as f32 / dt } else { 0.0 }
+                                }
+                                _ => 0.0,
+                            };
+                            ui.colored_label(
+                                theme::SUBTEXT,
+                                format!("board camera (AWB preview) — {fps:.1} fps"),
+                            );
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("dataset").color(theme::SUBTEXT));

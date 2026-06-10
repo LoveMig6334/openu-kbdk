@@ -66,9 +66,16 @@ cargo run -p kbdk-ui              # desktop app: Train/Convert/Deploy tabs (egui
 `kbdk-ui` notes: all blocking work (uv subprocesses via `kbdk-core::pipeline`,
 board I/O, device polling) runs on worker threads reporting over mpsc; the UI
 thread only renders. Field state persists via eframe Storage. The Deploy & Run
-tab shows the **live board camera** (kbrun drops a 240×240 RGB preview with a
-KBF1 header into /tmp every 3rd frame; the host pulls it over adb every ~400 ms)
-and has **dataset capture**: 📷 Capture / burst save frames as PNGs into
+tab shows the **live board camera at ~10 fps over TCP**: kbrun serves the latest
+240×240 KBF1 frame on port 18902 (one-shot per connection — wait for a *new* frame,
+send, close — which paces the host loop), reached via `adb forward`
+(`kbdk-core::frames::FrameStream`; forward removed on drop). kbrun also still drops
+the KBF1 file into /tmp every 6th frame, and the UI poller falls back to adb-pulling
+it (~2.5 fps) if the TCP fetch fails (older kbrun / no forward). Don't raise the TCP
+cadence past every-3rd-frame: the adbd transfer competes with inference on the single
+A7 (15 fps about doubles forward() wall time; at 10 fps it's ~640→950 ms, and only
+while a client is fetching — idle cost is unchanged). The tab also has **dataset
+capture**: 📷 Capture / burst save frames as PNGs into
 `<dataset>/<class>/` ImageFolder layout for the Train tab. Verification hooks
 (used by automated checks, harmless otherwise): `--screenshot PATH` (self-captures
 the viewport — no macOS screen-recording permission needed), `--tab train|convert|deploy`,
