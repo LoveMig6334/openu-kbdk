@@ -127,13 +127,16 @@ deploy-nnacam: nnacam
 	$(UAI) exec "chmod +x /tmp/nnacam"
 	@echo 'run: ./bin/uai exec "LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/nnacam 320x240 60"'
 
-# kbdk board runner: static-ncnn model-pack classifier (stage 1: file input).
+# kbdk board runner: model-pack classifier — static libncnn.a + dlopen'd MPP camera.
+# NOT -static (dlopen needs the dynamic loader); musl stays dynamic like nnacam,
+# with static libstdc++/libgcc so only the board's musl 1.1.16 is needed at runtime.
 # Needs board/ncnn/build.sh run once (pinned ncnn -> board/ncnn/dist).
 NCNN_DIST := board/ncnn/dist/board
 kbrun: bin/kbrun
 bin/kbrun: board/runner/kbrun.cpp board/runner/manifest.h | bin
-	$(CROSSXX) $(CROSSFLAGS) -I$(NCNN_DIST)/include/ncnn -static \
-	  -o $@ $< $(NCNN_DIST)/lib/libncnn.a
+	$(CROSSXX) $(CROSSFLAGS) $(MPPDEF) $(MPPINC) -I$(NCNN_DIST)/include/ncnn \
+	  -static-libstdc++ -static-libgcc \
+	  -o $@ $< $(NCNN_DIST)/lib/libncnn.a -ldl -lpthread -lm
 	arm-unknown-linux-musleabihf-strip $@
 
 bin:
