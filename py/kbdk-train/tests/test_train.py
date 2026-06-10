@@ -29,3 +29,15 @@ def test_train_toy(tmp_path, toy_dataset):
     )
     assert out.exists()
     assert classes == ["blue", "green", "red"]  # ImageFolder alphabetical
+
+
+def test_npu_slim_backbone_shape():
+    """npu_slim: NPU-compatible conv-only net (no depthwise/linear/BN at runtime),
+    64x64 in -> [B, n_classes] logits out, traceable."""
+    import torch
+    from kbdk_train.train import make_model
+
+    m = make_model("npu_slim", 3)
+    out = m(torch.rand(2, 3, 64, 64))
+    assert out.shape == (2, 3)
+    torch.jit.trace(m.eval(), torch.rand(1, 3, 64, 64))

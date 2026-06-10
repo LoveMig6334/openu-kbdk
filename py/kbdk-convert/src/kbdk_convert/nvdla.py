@@ -176,8 +176,12 @@ def emit_layer(l: ConvLayer) -> bytes:
 
 
 def emit_job(layers: list[ConvLayer], blobs: list[tuple[int, bytes]], *,
-             ion_size: int, out_offset: int, out_size: int) -> bytes:
-    head = b"NVJ1" + struct.pack("<4I", len(layers), ion_size, out_offset, out_size)
+             ion_size: int, out_offset: int, out_size: int,
+             in_offset: int = 0, in_size: int = 0) -> bytes:
+    """in_offset/in_size: where the runner loads its per-inference input file
+    (packed feature bytes); 0 size = input ships inside the blobs (parity jobs)."""
+    head = b"NVJ1" + struct.pack("<6I", len(layers), ion_size, out_offset, out_size,
+                                 in_offset, in_size)
     body = b"".join(emit_layer(l) for l in layers)
     blob = struct.pack("<I", len(blobs))
     for off, data in blobs:
@@ -187,5 +191,5 @@ def emit_job(layers: list[ConvLayer], blobs: list[tuple[int, bytes]], *,
 
 def parse_job_header(job: bytes) -> tuple[int, int]:
     assert job[:4] == b"NVJ1"
-    n_layers, ion_size, _, _ = struct.unpack_from("<4I", job, 4)
+    n_layers, ion_size, _, _, _, _ = struct.unpack_from("<6I", job, 4)
     return n_layers, ion_size

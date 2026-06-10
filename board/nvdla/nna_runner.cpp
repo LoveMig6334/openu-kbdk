@@ -21,7 +21,9 @@
  * it links third_party/v831-npu. It is deliberately a SEPARATE executable from
  * the MIT kbrun; they talk through the same pack/manifest + JSON-lines protocol.
  *
- * Usage: nna_runner JOB.nvj OUT.bin [repeat]
+ * Usage: nna_runner JOB.nvj IN.bin OUT.bin [repeat]
+ *        (IN.bin = packed int8 feature cube loaded at the job's in_offset
+ *         each iteration; "-" if the input already ships in the job blobs)
  *
  * Executes an "NVJ1" job file (emitted by py kbdk_convert.nvdla): one ION
  * allocation, blobs preloaded at fixed offsets, then per layer a fused
@@ -29,7 +31,7 @@
  * output region is written to OUT.bin. JSON-lines status on stdout.
  *
  * Job layout (little-endian; must match kbdk_convert/nvdla.py _LAYER_FMT):
- *   "NVJ1" u32 n_layers, u32 ion_size, u32 out_offset, u32 out_size
+ *   "NVJ1" u32 n_layers, ion_size, out_offset, out_size, in_offset, in_size
  *   n_layers x 64-byte layer records (struct nvj_layer)
  *   u32 n_blobs, then per blob: u32 offset, u32 size, size bytes
  */
@@ -184,8 +186,12 @@ static void setup_pdp(const nvj_layer *L, nna_pdp_op_desc *op, nna_pdp_surface_d
     op->stride_y = L->pool_stride;
     op->pad_left = L->pool_pad;
     op->pad_top = L->pool_pad;
-    op->pad_right = (L->pool_out_w - 1) * L->pool_stride + L->pool_w - (L->conv_out_w + L->pool_pad);
-    op->pad_bottom = (L->pool_out_h - 1) * L->pool_stride + L->pool_h - (L->conv_out_h + L->pool_pad);
+    /* floor-mode pooling can leave a remainder column/row -> negative "pad";
+     * clamp to 0 (u8 fields would wrap and PDP reads garbage) */
+    int pr = (L->pool_out_w - 1) * L->pool_stride + L->pool_w - (L->conv_out_w + L->pool_pad);
+    int pb = (L->pool_out_h - 1) * L->pool_stride + L->pool_h - (L->conv_out_h + L->pool_pad);
+    op->pad_right = pr > 0 ? pr : 0;
+    op->pad_bottom = pb > 0 ? pb : 0;
 
     sf->src_data.address = 0; /* fused: from SDP */
     sf->src_data.width = L->conv_out_w;
@@ -238,11 +244,13 @@ static int run_layer(const nvj_layer *L) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (argc < 3) {
-        fprintf(stderr, "usage: %s JOB.nvj OUT.bin [repeat]\n", argv[0]);
+    if (argc < 4) {
+        fprintf(stderr, "usage: %s JOB.nvj IN.bin|- OUT.bin [repeat]\n", argv[0]);
         return 2;
     }
-    int repeat = argc > 3 ? atoi(argv[3]) : 1;
+    const char *in_path = strcmp(argv[2], "-") ? argv[2] : NULL;
+    const char *out_path = argv[3];
+    int repeat = argc > 4 ? atoi(argv[4]) : 1;
     if (repeat < 1) repeat = 1;
 
     FILE *f = fopen(argv[1], "rb");
@@ -254,17 +262,31 @@ int main(int argc, char **argv) {
     if (fread(job, 1, fsz, f) != (size_t)fsz) { printf("{\"event\":\"error\",\"msg\":\"read job failed\"}\n"); return 1; }
     fclose(f);
 
-    if (fsz < 20 || memcmp(job, "NVJ1", 4)) {
+    if (fsz < 28 || memcmp(job, "NVJ1", 4)) {
         printf("{\"event\":\"error\",\"msg\":\"bad job magic\"}\n");
         return 1;
     }
-    uint32_t n_layers, ion_size, out_off, out_size;
+    uint32_t n_layers, ion_size, out_off, out_size, in_off, in_size;
     memcpy(&n_layers, job + 4, 4);
     memcpy(&ion_size, job + 8, 4);
     memcpy(&out_off, job + 12, 4);
     memcpy(&out_size, job + 16, 4);
-    const nvj_layer *layers = (const nvj_layer *)(job + 20);
-    const uint8_t *p = job + 20 + (size_t)n_layers * sizeof(nvj_layer);
+    memcpy(&in_off, job + 20, 4);
+    memcpy(&in_size, job + 24, 4);
+    const nvj_layer *layers = (const nvj_layer *)(job + 28);
+    const uint8_t *p = job + 28 + (size_t)n_layers * sizeof(nvj_layer);
+
+    uint8_t *in_data = NULL;
+    if (in_path) {
+        if (!in_size) { printf("{\"event\":\"error\",\"msg\":\"job has no input region\"}\n"); return 1; }
+        FILE *fi = fopen(in_path, "rb");
+        in_data = (uint8_t *)malloc(in_size);
+        if (!fi || fread(in_data, 1, in_size, fi) != in_size) {
+            printf("{\"event\":\"error\",\"msg\":\"read input failed (want %u bytes)\"}\n", in_size);
+            return 1;
+        }
+        fclose(fi);
+    }
 
     signal(SIGALRM, on_alarm);
 
@@ -293,6 +315,9 @@ int main(int argc, char **argv) {
     double lms[64];
     int rc = 0;
     for (int it = 0; it < repeat && rc == 0; it++) {
+        /* per-iteration input load: realistic per-frame cost in serve use */
+        if (in_data)
+            sunxi_ion_loadin((char *)in_data, in_size, (uint32_t)(uintptr_t)gp_paddr + in_off);
         for (uint32_t i = 0; i < n_layers; i++) {
             double t0 = now_ms();
             alarm(10);
@@ -306,7 +331,7 @@ int main(int argc, char **argv) {
     if (rc == 0) {
         uint8_t *out = (uint8_t *)malloc(out_size);
         sunxi_ion_loadout((uint32_t)(uintptr_t)gp_paddr + out_off, out_size, (char *)out);
-        FILE *o = fopen(argv[2], "wb");
+        FILE *o = fopen(out_path, "wb");
         if (o) { fwrite(out, 1, out_size, o); fclose(o); }
         else { printf("{\"event\":\"error\",\"msg\":\"write out failed\"}\n"); rc = 1; }
         free(out);

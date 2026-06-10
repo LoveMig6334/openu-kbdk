@@ -49,6 +49,8 @@ def main() -> int:
     ap.add_argument("--scale", type=int, default=23)
     ap.add_argument("--truncate", type=int, default=12)
     ap.add_argument("--bias-lshift", type=int, default=2)
+    ap.add_argument("--pool", type=int, default=0, help="fused PDP maxpool kernel (0=off)")
+    ap.add_argument("--pool-stride", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--push", action="store_true", help="push bin/nna_runner first")
@@ -59,8 +61,11 @@ def main() -> int:
     wt = rng.integers(-128, 128, size=(a.k, a.in_c, a.kdim, a.kdim), dtype=np.int8)
     bias = rng.integers(-3000, 3000, size=a.k, dtype=np.int16)
 
-    out_w = (a.size - a.kdim + 2 * a.pad) // a.stride + 1
-    out_h = out_w
+    conv_out = (a.size - a.kdim + 2 * a.pad) // a.stride + 1
+    if a.pool:
+        out_w = out_h = (conv_out - a.pool) // a.pool_stride + 1
+    else:
+        out_w = out_h = conv_out
 
     in_blob = nvdla.pack_feature(x)
     wt_blob = nvdla.pack_weights(wt)
@@ -79,6 +84,9 @@ def main() -> int:
         bias_lshift=a.bias_lshift, relu=a.relu,
         out_scale=a.scale, out_truncate=a.truncate,
         src_offset=src_off, wt_offset=wt_off, bias_offset=bias_off, dst_offset=dst_off,
+        has_pdp=bool(a.pool), pool_w=a.pool, pool_h=a.pool,
+        pool_stride=a.pool_stride if a.pool else 0, pool_pad=0,
+        pool_out_w=out_w if a.pool else 0, pool_out_h=out_h if a.pool else 0,
     )
     job = nvdla.emit_job(
         [layer],
@@ -94,7 +102,7 @@ def main() -> int:
             sh("adb", "shell", "chmod +x /tmp/nna_runner")
         sh("adb", "push", str(jp), "/tmp/job.nvj")
         out = sh(str(REPO / "target/debug/kbdk"), "exec",
-                 f"/tmp/nna_runner /tmp/job.nvj /tmp/out.bin {a.repeat}")
+                 f"/tmp/nna_runner /tmp/job.nvj - /tmp/out.bin {a.repeat}")
         print(out.strip())
         op = Path(td) / "out.bin"
         sh("adb", "pull", "/tmp/out.bin", str(op))
@@ -105,6 +113,8 @@ def main() -> int:
         want = nvdla.ref_conv_sdp(
             x, wt, bias, stride=a.stride, pad=a.pad, bias_lshift=a.bias_lshift,
             scale=a.scale, truncate=a.truncate, relu=a.relu, rounding=rounding)
+        if a.pool:
+            want = nvdla.ref_maxpool(want, pool=a.pool, stride=a.pool_stride, pad=0)
         diff = np.abs(got.astype(np.int32) - want.astype(np.int32))
         verdicts.append((rounding, int(diff.max()), int((diff > 0).sum()), diff.size))
         name = "round-half-up" if rounding else "truncate"
