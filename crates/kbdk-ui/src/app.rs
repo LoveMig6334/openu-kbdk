@@ -24,6 +24,8 @@ pub struct Fields {
     pub pack_name: String,
     pub packs_dir: String,
     pub res: String,
+    pub capture_dir: String,
+    pub capture_class: String,
 }
 
 impl Default for Fields {
@@ -38,6 +40,8 @@ impl Default for Fields {
             pack_name: "mypack".into(),
             packs_dir: "packs".into(),
             res: "320x240".into(),
+            capture_dir: "datasets/mydata".into(),
+            capture_class: "class_a".into(),
         }
     }
 }
@@ -74,6 +78,12 @@ pub struct KbdkApp {
     pub last_result: Option<serde_json::Value>,
     pub board_note: String,
     pub cam_tex: Option<egui::TextureHandle>,
+
+    // dataset capture (from the live board camera)
+    pub last_frame: Option<(usize, usize, Vec<u8>)>,
+    pub burst: bool,
+    pub captured_n: u32,
+    pub capture_note: String,
 
     frame_count: u32,
     shot_requested: bool,
@@ -124,6 +134,10 @@ impl KbdkApp {
             last_result: None,
             board_note: String::new(),
             cam_tex: None,
+            last_frame: None,
+            burst: false,
+            captured_n: 0,
+            capture_note: String::new(),
             frame_count: 0,
             shot_requested: false,
             started: std::time::Instant::now(),
@@ -142,6 +156,11 @@ impl KbdkApp {
         if std::env::var("KBDK_POLL").is_ok() {
             app.running = true;
             app.workers.run_pack_poll_only();
+        }
+        if std::env::var("KBDK_AUTOCAPTURE").is_ok() {
+            app.f.capture_dir = "datasets/uitest".into();
+            app.f.capture_class = "class_a".into();
+            app.burst = true;
         }
         if std::env::var("KBDK_AUTOTRAIN").is_ok() {
             app.f.tab = Tab::Train;
@@ -164,6 +183,43 @@ impl KbdkApp {
 
     pub fn rescan_packs(&mut self) {
         self.packs = deploy_tab::scan_packs(&self.workers.repo_root.join(&self.f.packs_dir));
+    }
+
+    /// Save the latest board frame as a PNG into <capture_dir>/<capture_class>/
+    /// (ImageFolder layout — point the Train tab at capture_dir afterwards).
+    pub fn save_capture(&mut self) {
+        let Some((w, h, rgb)) = &self.last_frame else {
+            self.capture_note = "no frame yet".into();
+            return;
+        };
+        let class = self.f.capture_class.trim();
+        if class.is_empty() {
+            self.capture_note = "set a class name first".into();
+            return;
+        }
+        let dir = self.workers.repo_root.join(&self.f.capture_dir).join(class);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.capture_note = format!("mkdir failed: {e}");
+            return;
+        }
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("cap_{ms}.png"));
+        match image::save_buffer(&path, rgb, *w as u32, *h as u32, image::ColorType::Rgb8) {
+            Ok(()) => {
+                self.captured_n += 1;
+                self.capture_note = format!(
+                    "{} saved ({} this session)",
+                    path.strip_prefix(&self.workers.repo_root)
+                        .unwrap_or(&path)
+                        .display(),
+                    self.captured_n
+                );
+            }
+            Err(e) => self.capture_note = format!("save failed: {e}"),
+        }
     }
 
     fn pump(&mut self) {
@@ -222,6 +278,10 @@ impl KbdkApp {
                                 egui::TextureOptions::LINEAR,
                             ))
                         }
+                    }
+                    self.last_frame = Some((w, h, rgb));
+                    if self.burst {
+                        self.save_capture();
                     }
                 }
                 Msg::BoardNote(s) => self.board_note = s,

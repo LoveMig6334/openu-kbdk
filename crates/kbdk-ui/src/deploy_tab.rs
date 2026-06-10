@@ -183,21 +183,63 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.horizontal_top(|ui| {
             // live camera preview (pulled from the board's /tmp/kbrun_frame.rgb)
-            if let Some(tex) = &app.cam_tex {
+            // + dataset capture (saves frames in ImageFolder layout for training)
+            if app.cam_tex.is_some() {
+                let mut capture_clicked = false;
                 egui::Frame::default()
                     .fill(theme::CRUST)
                     .corner_radius(8.0)
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
-                            ui.add(
-                                egui::Image::new(tex)
-                                    .fit_to_exact_size(egui::vec2(280.0, 280.0))
-                                    .corner_radius(4.0),
-                            );
+                            if let Some(tex) = &app.cam_tex {
+                                ui.add(
+                                    egui::Image::new(tex)
+                                        .fit_to_exact_size(egui::vec2(280.0, 280.0))
+                                        .corner_radius(4.0),
+                                );
+                            }
                             ui.colored_label(theme::SUBTEXT, "board camera (AWB preview)");
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("dataset").color(theme::SUBTEXT));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut app.f.capture_dir)
+                                        .desired_width(130.0),
+                                );
+                                ui.label(egui::RichText::new("class").color(theme::SUBTEXT));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut app.f.capture_class)
+                                        .desired_width(80.0),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("📷 Capture").color(theme::CRUST),
+                                        )
+                                        .fill(theme::YELLOW),
+                                    )
+                                    .clicked()
+                                {
+                                    capture_clicked = true;
+                                }
+                                ui.toggle_value(&mut app.burst, "burst (every frame)");
+                            });
+                            if !app.capture_note.is_empty() {
+                                let col = if app.capture_note.contains("failed") {
+                                    theme::RED
+                                } else {
+                                    theme::SUBTEXT
+                                };
+                                ui.colored_label(col, &app.capture_note);
+                            }
                         });
                     });
+                if capture_clicked {
+                    app.save_capture();
+                }
             }
             if let Some(r) = &app.last_result {
                 egui::Frame::default()
