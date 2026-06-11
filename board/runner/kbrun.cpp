@@ -588,6 +588,25 @@ static void fb_box_outline(float nx, float ny, float nw, float nh, const int col
     fb_rect(x + w - t, y, t, h, col[0], col[1], col[2]);
 }
 
+/* ---- full class-probability export (host UI shows every class) ---------------- */
+/* The result JSON only carries the top 5; the UI's all-classes list reads this
+ * tiny binary instead: "KBP1" + u16le n + n f32le, rewritten per inference
+ * (write-then-rename so pulls never see a half-written file). */
+#define PROBS_PATH "/tmp/kbrun_probs.bin"
+#define PROBS_TMP  "/tmp/.kbrun_probs.tmp"
+
+static void write_probs(const std::vector<float>& p){
+    FILE *f = fopen(PROBS_TMP, "wb");
+    if(!f) return;
+    uint16_t n = (uint16_t)(p.size() > 65535 ? 65535 : p.size());
+    unsigned char hdr[6] = {'K','B','P','1',
+        (unsigned char)(n & 0xFF), (unsigned char)(n >> 8)};
+    fwrite(hdr, 1, sizeof hdr, f);
+    fwrite(p.data(), 4, n, f);
+    fclose(f);
+    rename(PROBS_TMP, PROBS_PATH);
+}
+
 /* ---- inference worker (latest-wins handoff, same scheme as nnacam.cpp) -------- */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_cond = PTHREAD_COND_INITIALIZER;
@@ -629,6 +648,7 @@ static void *infer_thread(void *arg){
             const char *nm = best < (int)g_m.labels.size() ? g_m.labels[best].c_str() : "?";
             snprintf(buf,sizeof buf,"%s %d%%", nm, pct);
             print_result_json(probs, ms);
+            write_probs(probs);
         }
 
         pthread_mutex_lock(&g_lock);

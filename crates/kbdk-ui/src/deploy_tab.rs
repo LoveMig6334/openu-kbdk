@@ -46,6 +46,19 @@ fn scan_dir(packs_dir: &Path, builtin: bool, v: &mut Vec<PackInfo>) {
     }
 }
 
+/// Class names for a pack: manifest inline labels, else its labels_file.
+pub fn load_labels(dir: &Path) -> Vec<String> {
+    let Ok(m) = kbdk_core::pack::Manifest::load(dir) else {
+        return vec![];
+    };
+    if !m.labels.is_empty() {
+        return m.labels;
+    }
+    std::fs::read_to_string(dir.join(&m.files.labels_file))
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Your converted packs (packs/) + the stock board models (board-models/).
 pub fn scan_packs(packs_dir: &Path) -> Vec<PackInfo> {
     let mut v = vec![];
@@ -189,6 +202,13 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
     }
     if let Some(name) = run_clicked {
         app.last_result = None;
+        // class names for the all-classes list (board sends only indices+probs)
+        app.pack_labels = app
+            .packs
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| load_labels(&p.dir))
+            .unwrap_or_default();
         app.workers.run_pack(name, app.f.res.clone());
     }
 
@@ -373,20 +393,60 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
                             );
                         }
                         ui.add_space(6.0);
-                        for t in top.iter().skip(1).take(4) {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(t["label"].as_str().unwrap_or("?"))
-                                        .color(theme::SUBTEXT),
-                                );
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{:.1}%",
-                                        t["conf"].as_f64().unwrap_or(0.0) * 100.0
-                                    ))
-                                    .color(theme::OVERLAY0),
-                                );
-                            });
+                        if let Some(probs) = &app.board_probs {
+                            // every class, sorted by confidence, scrollbar on
+                            // the right (kbrun publishes the full softmax)
+                            let mut idx: Vec<usize> = (0..probs.len()).collect();
+                            idx.sort_by(|a, b| probs[*b].total_cmp(&probs[*a]));
+                            ui.colored_label(
+                                theme::SUBTEXT,
+                                format!("all {} classes", probs.len()),
+                            );
+                            let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+                            egui::ScrollArea::vertical()
+                                .max_height(280.0)
+                                .auto_shrink([false, true])
+                                .show_rows(ui, row_h, idx.len(), |ui, range| {
+                                    for r in range {
+                                        let i = idx[r];
+                                        let name = app
+                                            .pack_labels
+                                            .get(i)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("class #{i}"));
+                                        ui.horizontal(|ui| {
+                                            ui.add_sized(
+                                                [230.0, row_h - 4.0],
+                                                egui::Label::new(
+                                                    egui::RichText::new(name).color(
+                                                        if r == 0 { theme::GREEN } else { theme::SUBTEXT },
+                                                    ),
+                                                ),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!("{:.2}%", probs[i] * 100.0))
+                                                    .color(theme::OVERLAY0),
+                                            );
+                                        });
+                                    }
+                                });
+                        } else {
+                            // older kbrun on the board: only the top 5 exist
+                            for t in top.iter().skip(1).take(4) {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(t["label"].as_str().unwrap_or("?"))
+                                            .color(theme::SUBTEXT),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{:.1}%",
+                                            t["conf"].as_f64().unwrap_or(0.0) * 100.0
+                                        ))
+                                        .color(theme::OVERLAY0),
+                                    );
+                                });
+                            }
                         }
                         });
                     });

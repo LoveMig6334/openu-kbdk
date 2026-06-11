@@ -30,6 +30,8 @@ pub enum Msg {
     /// MemAvailable kB, kbrun VmRSS kB, and kbrun's frame/infer counters
     /// (host turns the counters into rates).
     BoardStats { load1: f32, mem_kb: u64, rss_kb: u64, frames: u64, infers: u64 },
+    /// Full class-probability vector (classification packs; every ~2 s).
+    BoardProbs(Vec<f32>),
     BoardNote(String),
 }
 
@@ -64,6 +66,25 @@ pub fn parse_kbstat(line: &str) -> Option<(f32, u64, u64, u64, u64)> {
         it.next()?.parse().ok()?,
         it.next()?.parse().ok()?,
     ))
+}
+
+/// Parse kbrun's full class-probability file: "KBP1" + u16le n + n f32le.
+/// (The result JSON only carries the top 5; this carries the whole softmax
+/// for the UI's all-classes list.)
+pub fn parse_probs(data: &[u8]) -> Option<Vec<f32>> {
+    if data.len() < 6 || &data[0..4] != b"KBP1" {
+        return None;
+    }
+    let n = u16::from_le_bytes([data[4], data[5]]) as usize;
+    if n == 0 || data.len() < 6 + n * 4 {
+        return None;
+    }
+    Some(
+        data[6..6 + n * 4]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    )
 }
 
 /// Parse the kbrun preview file: "KBF1" + u16le w + u16le h + w*h*3 RGB bytes.
@@ -215,6 +236,7 @@ impl Workers {
             use std::time::{Duration, Instant};
             let t = AdbTransport::new(None);
             let frame_local = std::env::temp_dir().join(format!("kbdk_frame_{}.rgb", std::process::id()));
+            let probs_local = std::env::temp_dir().join(format!("kbdk_probs_{}.bin", std::process::id()));
             // The forward is set up once; whether anything answers on it depends
             // on the kbrun running board-side, so probe per-fetch and fall back.
             let stream = frames::FrameStream::connect(None, frames::FRAME_PORT).ok();
@@ -270,6 +292,15 @@ impl Workers {
                                 });
                                 ctx.request_repaint();
                             }
+                            // full class probabilities (absent for detection packs)
+                            if t.pull("/tmp/kbrun_probs.bin", &probs_local).is_ok() {
+                                if let Some(p) =
+                                    std::fs::read(&probs_local).ok().and_then(|d| parse_probs(&d))
+                                {
+                                    let _ = tx.send(Msg::BoardProbs(p));
+                                    ctx.request_repaint();
+                                }
+                            }
                         }
                         Err(e) => {
                             let _ = tx.send(Msg::BoardNote(format!("log poll: {e}")));
@@ -283,6 +314,7 @@ impl Workers {
                 std::thread::sleep(Duration::from_millis(if used_tcp { 5 } else { 400 }));
             }
             let _ = std::fs::remove_file(&frame_local);
+            let _ = std::fs::remove_file(&probs_local);
         });
     }
 }
@@ -295,6 +327,18 @@ mod tests {
     fn kbstat_line_parses() {
         let s = parse_kbstat("KBSTAT 0.93 37348 15208 120 121").unwrap();
         assert_eq!(s, (0.93, 37348, 15208, 120, 121));
+    }
+
+    #[test]
+    fn probs_file_parses() {
+        let mut d = b"KBP1\x03\x00".to_vec();
+        for v in [0.7f32, 0.2, 0.1] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        let p = super::parse_probs(&d).unwrap();
+        assert_eq!(p, vec![0.7, 0.2, 0.1]);
+        assert!(super::parse_probs(b"KBF1xxxx").is_none());
+        assert!(super::parse_probs(&d[..10]).is_none()); // truncated
     }
 
     #[test]

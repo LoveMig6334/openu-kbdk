@@ -105,6 +105,11 @@ pub struct KbdkApp {
     /// arrival times of recent board frames, for the preview fps readout
     pub frame_times: std::collections::VecDeque<std::time::Instant>,
 
+    /// full softmax from the board (all classes, classification packs)
+    pub board_probs: Option<Vec<f32>>,
+    /// class names of the running pack (for the all-classes list)
+    pub pack_labels: Vec<String>,
+
     // board performance monitor (deploy tab; sampled every ~2 s while running)
     pub perf_ms: Vec<[f64; 2]>,       // (t secs, inference latency ms)
     pub perf_cam_fps: Vec<[f64; 2]>,  // (t, camera frames/s)
@@ -204,6 +209,8 @@ impl KbdkApp {
             board_note: String::new(),
             cam_tex: None,
             frame_times: std::collections::VecDeque::new(),
+            board_probs: None,
+            pack_labels: vec![],
             perf_ms: vec![],
             perf_cam_fps: vec![],
             perf_inf_rate: vec![],
@@ -230,8 +237,15 @@ impl KbdkApp {
                 _ => Tab::Train,
             };
         }
-        if std::env::var("KBDK_POLL").is_ok() {
+        if let Ok(v) = std::env::var("KBDK_POLL") {
             app.running = true;
+            // KBDK_POLL=<packname> also loads that pack's labels (the runner
+            // was started externally, so the Run button never resolved them)
+            if v != "1" {
+                if let Some(p) = app.packs.iter().find(|p| p.name == v) {
+                    app.pack_labels = deploy_tab::load_labels(&p.dir);
+                }
+            }
             app.workers.run_pack_poll_only();
         }
         if std::env::var("KBDK_AUTOCAPTURE").is_ok() {
@@ -348,6 +362,7 @@ impl KbdkApp {
                         self.perf_cam_fps.clear();
                         self.perf_inf_rate.clear();
                         self.perf_prev = None;
+                        self.board_probs = None;
                     }
                     Err(e) => self.board_note = format!("start failed: {e}"),
                 },
@@ -362,6 +377,7 @@ impl KbdkApp {
                     }
                     self.last_result = Some(v);
                 }
+                Msg::BoardProbs(p) => self.board_probs = Some(p),
                 Msg::BoardStats { load1, mem_kb, rss_kb, frames, infers } => {
                     self.perf_load = load1;
                     self.perf_mem_kb = mem_kb;

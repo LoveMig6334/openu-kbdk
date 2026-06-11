@@ -99,7 +99,12 @@ by pidof for the same reason, and `kbdk run` now replaces a running instance),
 plus plots of inference latency (from result events) and camera-fps vs
 infers/s (deltas of the frame/infer counters kbrun logs every 30 frames).
 A dark/covered camera legitimately shows 0 rates — the avgY gate skips those
-frames entirely. Verification hooks (used by automated checks, harmless otherwise):
+frames entirely. The classification result card lists **all classes** in a
+scroll area (sorted by confidence): kbrun rewrites the full softmax to
+/tmp/kbrun_probs.bin per inference ("KBP1" + u16le n + n f32le, ~4 KB for
+ImageNet-1000) and the poller pulls it every ~2 s; class names come from the
+pack's manifest/labels.txt host-side (KBDK_POLL=<packname> resolves them for
+externally-started runners). Verification hooks (used by automated checks, harmless otherwise):
 `--screenshot PATH` (self-captures the viewport — no macOS screen-recording
 permission needed), `--tab train|convert|deploy`, `KBDK_SHOT_DELAY=secs`,
 `KBDK_AUTOTRAIN=1`, `KBDK_AUTOCONVERT=1`, `KBDK_POLL=1` (start the board log
