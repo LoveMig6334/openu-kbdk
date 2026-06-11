@@ -99,6 +99,11 @@ impl Workers {
         self.run_py("kbdk-convert", args, Msg::ConvertEvent, Msg::ConvertDone);
     }
 
+    /// NPU path: kbdk_convert.nvdla_compile (PTQ -> NVJ1 job -> runtime "nvdla" pack)
+    pub fn convert_nvdla(&self, args: Vec<String>) {
+        self.run_py("kbdk-nvdla", args, Msg::ConvertEvent, Msg::ConvertDone);
+    }
+
     /// SIGTERM the running uv child (train/convert).
     pub fn kill_py(&self) {
         if let Some(pid) = *self.py_pid.lock().unwrap() {

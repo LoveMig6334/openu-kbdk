@@ -8,6 +8,23 @@ use kbdk_core::pipeline::PyEvent;
 pub fn on_event(app: &mut KbdkApp, e: PyEvent) {
     let PyEvent::Line(v) = e else { return };
     match v["event"].as_str().unwrap_or("") {
+        // nvdla compiler events: one parity line, then saved
+        "parity" => {
+            app.parity = v["int8_vs_float_top1"]
+                .as_f64()
+                .or_else(|| v["int8_vs_float_boxes"].as_f64());
+            app.convert_steps.push(format!(
+                "parity: int8 vs float {:.0}% ({})",
+                app.parity.unwrap_or(0.0) * 100.0,
+                if v["int8_vs_float_boxes"].is_f64() { "boxes" } else { "top-1" },
+            ));
+        }
+        "saved" => {
+            if let Some(pack) = v["pack"].as_str() {
+                app.convert_steps.push(format!("pack ready: {pack}"));
+                app.built_pack = Some(pack.to_string());
+            }
+        }
         "step" => {
             let name = v["name"].as_str().unwrap_or("?");
             if name == "parity" {
@@ -38,6 +55,24 @@ pub fn start(app: &mut KbdkApp, model: String) {
     app.convert_steps.clear();
     app.parity = None;
     let root = &app.workers.repo_root;
+    if app.f.runtime == "nvdla" {
+        let mut args = vec![
+            "--model".into(),
+            model,
+            "--data".into(),
+            root.join(&app.f.data_dir).display().to_string(),
+            "--name".into(),
+            app.f.pack_name.clone(),
+            "--out-dir".into(),
+            root.join(&app.f.packs_dir).join(&app.f.pack_name).display().to_string(),
+        ];
+        // detection takes its size from the model's .meta.json sidecar
+        if app.f.task != "detection" {
+            args.extend(["--size".into(), app.f.size.to_string()]);
+        }
+        app.workers.convert_nvdla(args);
+        return;
+    }
     app.workers.convert(vec![
         "--model".into(),
         model,
@@ -63,12 +98,24 @@ pub fn default_model(app: &KbdkApp) -> String {
 }
 
 pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
-    ui.heading("Convert to a board pack (int8 ncnn)");
+    ui.heading("Convert to a board pack (int8)");
     ui.add_space(6.0);
 
     let mut model = default_model(app);
 
     let label_w = 190.0;
+    ui.horizontal(|ui| {
+        ui.add_sized([label_w, 18.0], egui::Label::new("Target"));
+        egui::ComboBox::from_id_salt("runtime")
+            .selected_text(if app.f.runtime == "nvdla" { "NPU (NVDLA)" } else { "CPU (int8 ncnn)" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.f.runtime, "ncnn".into(), "CPU (int8 ncnn — any backbone)");
+                ui.selectable_value(&mut app.f.runtime, "nvdla".into(), "NPU (NVDLA — npu_slim models only)");
+            });
+        if app.f.runtime == "nvdla" && app.f.backbone != "npu_slim" {
+            ui.colored_label(theme::YELLOW, "needs a model trained with the npu_slim backbone");
+        }
+    });
     ui.horizontal(|ui| {
         ui.add_sized([label_w, 18.0], egui::Label::new("TorchScript model"));
         ui.add_enabled(false, egui::TextEdit::singleline(&mut model).desired_width(420.0));
