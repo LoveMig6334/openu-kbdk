@@ -59,8 +59,12 @@ pub fn deploy_runner(t: &dyn Transport, local_kbrun: &Path) -> Result<()> {
 /// (KBRUN_DAEMON=1 → fork + setsid + writes /tmp/kbrun.pid) and this command
 /// returns when the parent exits.
 pub fn start_runner(t: &dyn Transport, remote_pack: &str, res: &str, nframes: u32) -> Result<()> {
+    // replace any existing runner first — a second kbrun can't open the camera
+    // pipeline and would die after poisoning /tmp/kbrun.pid (kill by pidof,
+    // not the pid file, for exactly that reason)
     let cmd = format!(
-        "rm -f /tmp/kbrun.pid; KBRUN_DAEMON=1 LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib \
+        "kill $(pidof kbrun) 2>/dev/null && sleep 2; rm -f /tmp/kbrun.pid; \
+         KBRUN_DAEMON=1 LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib \
          {RUNNER} {remote_pack} {res} {nframes} < /dev/null > /tmp/kbrun.log 2>/tmp/kbrun.err; true"
     );
     let r = t.exec(&cmd, 15)?;
@@ -72,7 +76,7 @@ pub fn start_runner(t: &dyn Transport, remote_pack: &str, res: &str, nframes: u3
 
 pub fn stop_runner(t: &dyn Transport) -> Result<()> {
     t.exec(
-        "[ -f /tmp/kbrun.pid ] && kill $(cat /tmp/kbrun.pid) 2>/dev/null; rm -f /tmp/kbrun.pid; true",
+        "kill $(pidof kbrun) 2>/dev/null; rm -f /tmp/kbrun.pid; true",
         15,
     )?;
     Ok(())

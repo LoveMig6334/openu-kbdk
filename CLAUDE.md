@@ -91,7 +91,15 @@ has a Target selector — CPU (int8 ncnn) or NPU (NVDLA, runs `kbdk-nvdla` =
 `kbdk_convert.nvdla_compile` and shows the int8-vs-float parity). UI **zoom
 defaults to 1.25× native** (set via `set_zoom_factor` — never `set_pixels_per_point`,
 which fights retina scaling); Cmd+± changes persist via the `ui_zoom` field.
-Verification hooks (used by automated checks, harmless otherwise):
+The Deploy tab also has a **board performance monitor** (samples every ~2 s
+while running, piggybacked on the log-poll exec as a `KBSTAT` line): CPU load,
+MemAvailable, kbrun VmRSS (via `pidof`, NOT /tmp/kbrun.pid — a duplicate kbrun
+dies on the busy camera *after* poisoning the pid file; start/stop_runner kill
+by pidof for the same reason, and `kbdk run` now replaces a running instance),
+plus plots of inference latency (from result events) and camera-fps vs
+infers/s (deltas of the frame/infer counters kbrun logs every 30 frames).
+A dark/covered camera legitimately shows 0 rates — the avgY gate skips those
+frames entirely. Verification hooks (used by automated checks, harmless otherwise):
 `--screenshot PATH` (self-captures the viewport — no macOS screen-recording
 permission needed), `--tab train|convert|deploy`, `KBDK_SHOT_DELAY=secs`,
 `KBDK_AUTOTRAIN=1`, `KBDK_AUTOCONVERT=1`, `KBDK_POLL=1` (start the board log

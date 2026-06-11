@@ -26,7 +26,44 @@ pub enum Msg {
     BoardResult(serde_json::Value),
     /// Latest camera preview frame pulled from the board (RGB888).
     BoardFrame { w: usize, h: usize, rgb: Vec<u8> },
+    /// Periodic board health sample (every ~2 s while running): 1-min load,
+    /// MemAvailable kB, kbrun VmRSS kB, and kbrun's frame/infer counters
+    /// (host turns the counters into rates).
+    BoardStats { load1: f32, mem_kb: u64, rss_kb: u64, frames: u64, infers: u64 },
     BoardNote(String),
+}
+
+/// One exec per poll tick: last result lines + the KBSTAT health sample
+/// (see parse_kbstat). kbrun logs "frame N … infers=M" to stderr every 30
+/// frames, so the counters lag at most a second.
+const LOG_STAT_CMD: &str = concat!(
+    "tail -n 3 /tmp/kbrun.log 2>/dev/null; ",
+    "echo KBSTAT $(cut -d' ' -f1 /proc/loadavg) ",
+    "$(awk '/MemAvailable/{print $2}' /proc/meminfo) ",
+    "$(p=$(pidof kbrun); ",
+    "if [ -n \"$p\" ]; then awk '/VmRSS/{print $2}' /proc/${p%% *}/status 2>/dev/null || echo 0; ",
+    "else echo 0; fi) ",
+    "$(tail -n 8 /tmp/kbrun.err 2>/dev/null | ",
+    "awk '/infers=/{f=$2; n=$NF; sub(/infers=/,\"\",n); i=n} END{printf \"%d %d\", f+0, i+0}'); ",
+    "true",
+);
+
+/// Parse the board stat line the log poller requests:
+/// "KBSTAT <load1> <mem_avail_kb> <kbrun_rss_kb> <frames> <infers>"
+/// (loadavg + meminfo + kbrun VmRSS + the frame/infer counters kbrun logs
+/// to stderr every 30 frames). Returns None unless all five fields parse.
+pub fn parse_kbstat(line: &str) -> Option<(f32, u64, u64, u64, u64)> {
+    let mut it = line.trim().split_whitespace();
+    if it.next() != Some("KBSTAT") {
+        return None;
+    }
+    Some((
+        it.next()?.parse().ok().filter(|v: &f32| v.is_finite())?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+    ))
 }
 
 /// Parse the kbrun preview file: "KBF1" + u16le w + u16le h + w*h*3 RGB bytes.
@@ -213,10 +250,10 @@ impl Workers {
                         }
                     }
                 }
-                // result line every ~2 s
+                // result line + board health sample every ~2 s
                 if last_log.elapsed() >= Duration::from_secs(2) {
                     last_log = Instant::now();
-                    match t.exec("tail -n 3 /tmp/kbrun.log 2>/dev/null; true", 15) {
+                    match t.exec(LOG_STAT_CMD, 15) {
                         Ok(r) => {
                             for line in r.output.lines().rev() {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
@@ -226,6 +263,12 @@ impl Workers {
                                         break;
                                     }
                                 }
+                            }
+                            if let Some(s) = r.output.lines().rev().find_map(parse_kbstat) {
+                                let _ = tx.send(Msg::BoardStats {
+                                    load1: s.0, mem_kb: s.1, rss_kb: s.2, frames: s.3, infers: s.4,
+                                });
+                                ctx.request_repaint();
                             }
                         }
                         Err(e) => {
@@ -241,5 +284,24 @@ impl Workers {
             }
             let _ = std::fs::remove_file(&frame_local);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_kbstat;
+
+    #[test]
+    fn kbstat_line_parses() {
+        let s = parse_kbstat("KBSTAT 0.93 37348 15208 120 121").unwrap();
+        assert_eq!(s, (0.93, 37348, 15208, 120, 121));
+    }
+
+    #[test]
+    fn kbstat_rejects_garbage() {
+        assert!(parse_kbstat("KBSTAT 0.93 nan").is_none());
+        assert!(parse_kbstat("frame 120 avgY= 23").is_none());
+        // idle board: no kbrun.pid / no err file -> zeros still parse
+        assert_eq!(parse_kbstat("KBSTAT 0.05 40000 0 0 0").unwrap(), (0.05, 40000, 0, 0, 0));
     }
 }
