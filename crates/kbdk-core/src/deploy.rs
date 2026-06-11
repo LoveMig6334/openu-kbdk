@@ -63,7 +63,7 @@ pub fn start_runner(t: &dyn Transport, remote_pack: &str, res: &str, nframes: u3
     // pipeline and would die after poisoning /tmp/kbrun.pid (kill by pidof,
     // not the pid file, for exactly that reason)
     let cmd = format!(
-        "kill $(pidof kbrun) 2>/dev/null && sleep 2; rm -f /tmp/kbrun.pid; \
+        "kill $(pidof kbrun) 2>/dev/null && sleep 2; rm -f /tmp/kbrun.pid /tmp/kbrun_probs.bin; \
          KBRUN_DAEMON=1 LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib \
          {RUNNER} {remote_pack} {res} {nframes} < /dev/null > /tmp/kbrun.log 2>/tmp/kbrun.err; true"
     );
