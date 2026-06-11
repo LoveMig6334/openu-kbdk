@@ -323,7 +323,9 @@ def main(argv=None) -> int:
     ap.add_argument("--name", required=True)
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--size", type=int, default=None,
-                    help="input size (default: 64, or the detection meta's size)")
+                    help="input size (default: the backbone's native, or the detection meta's)")
+    ap.add_argument("--backbone", default="npu_slim",
+                    help="classification model constructor: npu_slim | npu_mid")
     a = ap.parse_args(argv)
     out_dir = a.out_dir or Path("packs") / a.name
 
@@ -342,7 +344,8 @@ def main(argv=None) -> int:
         imgs, _ = load_yolo_images(a.data, size)
 
         from kbdk_train.detect import decode_boxes, nms, npu_det
-        model = npu_det(len(classes), len(anchors) // 2).eval()
+        width = "mid" if det_meta.get("backbone") == "npu-det-mid" else "slim"
+        model = npu_det(len(classes), len(anchors) // 2, width=width).eval()
         model.load_state_dict(torch.jit.load(str(a.model), map_location="cpu").state_dict())
 
         qlayers, meta = quantize_slim(extract_slim_layers(model), imgs)
@@ -365,16 +368,17 @@ def main(argv=None) -> int:
         detection = {"grid": det_meta["grid"], "anchors": anchors,
                      "conf_threshold": det_meta.get("conf_threshold", 0.5),
                      "nms_threshold": det_meta.get("nms_threshold", 0.45)}
-        _write_pack(out_dir, a.name, "detection", "npu-det", size, classes,
-                    job, info, meta, detection)
+        _write_pack(out_dir, a.name, "detection", det_meta.get("backbone", "npu-det"),
+                    size, classes, job, info, meta, detection)
         print(json.dumps({"event": "saved", "pack": str(out_dir), **info}))
         return 0
 
-    size = a.size or 64
+    size = a.size or {"npu_slim": 64, "npu_mid": 112}[a.backbone]
     imgs, classes, labels = load_calib_images(a.data, size)
 
-    from kbdk_train.train import npu_slim
-    model = npu_slim(len(classes)).eval()
+    from kbdk_train.train import npu_mid, npu_slim
+    ctor = {"npu_slim": npu_slim, "npu_mid": npu_mid}[a.backbone]
+    model = ctor(len(classes)).eval()
     model.load_state_dict(torch.jit.load(str(a.model), map_location="cpu").state_dict())
 
     qlayers, meta = quantize_slim(extract_slim_layers(model), imgs)
@@ -391,7 +395,7 @@ def main(argv=None) -> int:
                       "int8_acc": correct / n, "n": n}))
 
     job, info = build_job(qlayers, size, size)
-    _write_pack(out_dir, a.name, "classification", "npu_slim", size, classes,
+    _write_pack(out_dir, a.name, "classification", a.backbone, size, classes,
                 job, info, meta, None)
     print(json.dumps({"event": "saved", "pack": str(out_dir), **info}))
     return 0

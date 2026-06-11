@@ -62,7 +62,7 @@ kbdk deploy packs/NAME            # md5-verified push to /mnt/UDISK/kbdk/NAME + 
 kbdk run NAME [--frames N]        # live camera + overlay; kbdk log / kbdk stop
 
 # NPU (NVDLA) path: conv-only backbone -> int8 job -> runs on the V831's NPU
-kbdk train --data DIR --out models/m.pt --backbone npu_slim --size 64
+kbdk train --data DIR --out models/m.pt --backbone npu_slim --size 64   # or npu_mid --size 112
 uv run --project py python -m kbdk_convert.nvdla_compile \
     --model models/m.pt --data DIR --name NAME            # -> packs/NAME (runtime nvdla)
 # then kbdk deploy/run as usual; scripts/nvdla_{parity,verify}.py = hardware checks
@@ -168,7 +168,11 @@ Hard-won facts baked into kbdk (don't re-learn these):
   int8 ncnn on CPU** — inference outruns the 30 fps camera (infers ≈ frames in
   kbrun). The toy pack is byte-exact host-sim↔board on 12/12 images. Depthwise is
   NOT supported by nv_small — MobileNet-style nets can't go on the NPU; that's why
-  npu_slim exists.
+  npu_slim exists. `npu_mid` is the wider variant (112², channels 32→128, 7×7-conv
+  head — kernel size parity-verified) for accuracy headroom: ~350 KB int8, still
+  far above camera rate; the same `width="mid"` option widens npu_det
+  (meta/manifest backbone "npu-det-mid"). Envelope + capacity numbers:
+  docs/research/2026-06-11-bigger-npu-models.md.
 - **Detection on the NPU**: `kbdk train --task detection --backbone npu_slim --size 112`
   trains `npu_det` (conv-only YOLOv2, 112×112 → 7×7 grid, 1×1-conv head to
   A·(5+C)); the same `nvdla_compile` invocation detects the `.meta.json` sidecar

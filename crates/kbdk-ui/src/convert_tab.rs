@@ -66,9 +66,10 @@ pub fn start(app: &mut KbdkApp, model: String) {
             "--out-dir".into(),
             root.join(&app.f.packs_dir).join(&app.f.pack_name).display().to_string(),
         ];
-        // detection takes its size from the model's .meta.json sidecar
+        // detection takes its size + backbone from the model's .meta.json sidecar
         if app.f.task != "detection" {
             args.extend(["--size".into(), app.f.size.to_string()]);
+            args.extend(["--backbone".into(), app.f.backbone.clone()]);
         }
         app.workers.convert_nvdla(args);
         return;
@@ -110,10 +111,10 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
             .selected_text(if app.f.runtime == "nvdla" { "NPU (NVDLA)" } else { "CPU (int8 ncnn)" })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut app.f.runtime, "ncnn".into(), "CPU (int8 ncnn — any backbone)");
-                ui.selectable_value(&mut app.f.runtime, "nvdla".into(), "NPU (NVDLA — npu_slim models only)");
+                ui.selectable_value(&mut app.f.runtime, "nvdla".into(), "NPU (NVDLA — npu_slim / npu_mid models)");
             });
-        if app.f.runtime == "nvdla" && app.f.backbone != "npu_slim" {
-            ui.colored_label(theme::YELLOW, "needs a model trained with the npu_slim backbone");
+        if app.f.runtime == "nvdla" && !app.f.backbone.starts_with("npu_") {
+            ui.colored_label(theme::YELLOW, "needs a model trained with an npu_* backbone");
         }
     });
     ui.horizontal(|ui| {

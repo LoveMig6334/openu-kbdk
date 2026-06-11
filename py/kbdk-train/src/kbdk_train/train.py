@@ -56,9 +56,40 @@ def npu_slim(n_classes: int) -> nn.Sequential:
     ))
 
 
+def npu_mid(n_classes: int) -> nn.Sequential:
+    """Wider NPU classifier (112x112): channels 32->64->96->128, an extra
+    128-ch stage at 7x7, 7x7-conv head to 1x1 logits. Everything inside the
+    hardware-verified NVDLA envelope (channels <= 128, input <= 112^2, 7x7
+    kernel parity-checked). ~350 KB int8, ~5 ms/inf on the NPU — the "use the
+    headroom" backbone from docs/research/2026-06-11-bigger-npu-models.md."""
+    from collections import OrderedDict
+
+    def block(i: int, cin: int, cout: int, pool: bool = True):
+        mods = [
+            (f"conv{i}", nn.Conv2d(cin, cout, 3, 1, 1, bias=False)),
+            (f"bn{i}", nn.BatchNorm2d(cout)),
+            (f"relu{i}", nn.ReLU(inplace=True)),
+        ]
+        if pool:
+            mods.append((f"pool{i}", nn.MaxPool2d(2, 2)))
+        return mods
+
+    return nn.Sequential(OrderedDict(
+        block(1, 3, 32)        # 112 -> 56
+        + block(2, 32, 64)     # 56 -> 28
+        + block(3, 64, 96)     # 28 -> 14
+        + block(4, 96, 128)    # 14 -> 7
+        + block(5, 128, 128, pool=False)
+        + [("head", nn.Conv2d(128, n_classes, 7)),  # 7x7 -> 1x1 logits
+           ("flatten", nn.Flatten())]
+    ))
+
+
 def make_model(backbone: str, n_classes: int) -> nn.Module:
     if backbone == "npu_slim":
         return npu_slim(n_classes)
+    if backbone == "npu_mid":
+        return npu_mid(n_classes)
     if backbone == "mobilenet_v2":
         m = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
         m.classifier[1] = nn.Linear(m.last_channel, n_classes)
@@ -66,7 +97,8 @@ def make_model(backbone: str, n_classes: int) -> nn.Module:
         m = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
         m.fc = nn.Linear(m.fc.in_features, n_classes)
     else:
-        raise ValueError(f"unknown backbone {backbone} (mobilenet_v2 | resnet18 | npu_slim)")
+        raise ValueError(
+            f"unknown backbone {backbone} (mobilenet_v2 | resnet18 | npu_slim | npu_mid)")
     return m
 
 

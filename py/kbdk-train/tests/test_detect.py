@@ -85,3 +85,14 @@ def test_npu_det_backbone_shape():
     out = m(torch.rand(2, 3, 112, 112))
     assert out.shape == (2, 5 * (5 + 3), 7, 7)
     torch.jit.trace(m.eval(), torch.rand(1, 3, 112, 112))
+
+
+def test_npu_det_mid_backbone_shape():
+    """npu_det width='mid': wider detection backbone, same 7x7 grid."""
+    import torch
+    from kbdk_train.detect import npu_det
+
+    m = npu_det(n_classes=3, n_anchors=5, width="mid")
+    out = m(torch.rand(2, 3, 112, 112))
+    assert out.shape == (2, 5 * (5 + 3), 7, 7)
+    torch.jit.trace(m.eval(), torch.rand(1, 3, 112, 112))

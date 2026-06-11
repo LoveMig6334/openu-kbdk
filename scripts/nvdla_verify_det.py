@@ -55,7 +55,8 @@ def main() -> int:
     imgs, _ = nvdla_compile.load_yolo_images(a.data, size)
 
     from kbdk_train.detect import box_iou, decode_boxes, nms, npu_det
-    model = npu_det(len(classes), len(anchors) // 2).eval()
+    width = "mid" if manifest.get("backbone") == "npu-det-mid" else "slim"
+    model = npu_det(len(classes), len(anchors) // 2, width=width).eval()
     model.load_state_dict(torch.jit.load(str(a.model), map_location="cpu").state_dict())
     qlayers, _ = nvdla_compile.quantize_slim(
         nvdla_compile.extract_slim_layers(model), imgs)

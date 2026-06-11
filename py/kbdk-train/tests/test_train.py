@@ -41,3 +41,15 @@ def test_npu_slim_backbone_shape():
     out = m(torch.rand(2, 3, 64, 64))
     assert out.shape == (2, 3)
     torch.jit.trace(m.eval(), torch.rand(1, 3, 64, 64))
+
+
+def test_npu_mid_backbone_shape():
+    """npu_mid: the wider NPU classifier (112x112, channels to 128, 7x7-conv
+    head) — stays inside the verified NVDLA envelope (<=128 ch, <=112^2)."""
+    import torch
+    from kbdk_train.train import make_model
+
+    m = make_model("npu_mid", 5)
+    out = m(torch.rand(2, 3, 112, 112))
+    assert out.shape == (2, 5)
+    torch.jit.trace(m.eval(), torch.rand(1, 3, 112, 112))
