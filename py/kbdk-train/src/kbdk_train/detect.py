@@ -91,12 +91,14 @@ def kmeans_anchors(dataset: YoloDataset, k: int = N_ANCHORS, grid: int = GRID) -
 
 
 # ------------------------------------------------------------------ model ----
-def npu_det(n_classes: int, n_anchors: int = N_ANCHORS) -> nn.Sequential:
+def npu_det(n_classes: int, n_anchors: int = N_ANCHORS, width: str = "slim") -> nn.Sequential:
     """Conv-only YOLOv2 detector for the V831 NPU (NVDLA nv_small): plain convs
     + BN (compile-time folded) + ReLU + maxpool, 1x1-conv head to the raw
     (A*(5+C))xSxS map. 112x112 input -> 7x7 grid (4 pools). No depthwise (the
     hardware has none) — this is the NPU stand-in for the MobileNetV2 backbone.
-    Flat named Sequential so kbdk_convert.nvdla_compile can walk it."""
+    width "mid" = the wider variant (channels to 128, extra 7x7 stage; see
+    docs/research/2026-06-11-bigger-npu-models.md). Flat named Sequential so
+    kbdk_convert.nvdla_compile can walk it."""
     from collections import OrderedDict
 
     def block(i: int, cin: int, cout: int, pool: bool = True):
@@ -109,13 +111,15 @@ def npu_det(n_classes: int, n_anchors: int = N_ANCHORS) -> nn.Sequential:
             mods.append((f"pool{i}", nn.MaxPool2d(2, 2)))
         return mods
 
+    chans = {"slim": (16, 32, 48, 64, 64), "mid": (32, 64, 96, 128, 128)}[width]
+    c1, c2, c3, c4, c5 = chans
     return nn.Sequential(OrderedDict(
-        block(1, 3, 16)        # 112 -> 56
-        + block(2, 16, 32)     # 56 -> 28
-        + block(3, 32, 48)     # 28 -> 14
-        + block(4, 48, 64)     # 14 -> 7
-        + block(5, 64, 64, pool=False)
-        + [("head", nn.Conv2d(64, n_anchors * (5 + n_classes), 1))]
+        block(1, 3, c1)        # 112 -> 56
+        + block(2, c1, c2)     # 56 -> 28
+        + block(3, c2, c3)     # 28 -> 14
+        + block(4, c3, c4)     # 14 -> 7
+        + block(5, c4, c5, pool=False)
+        + [("head", nn.Conv2d(c5, n_anchors * (5 + n_classes), 1))]
     ))
 
 
@@ -267,15 +271,15 @@ def train_detection(
     device = torch.device(
         device_str or ("mps" if torch.backends.mps.is_available() else "cpu")
     )
-    npu = backbone == "npu_slim"
+    npu = backbone in ("npu_slim", "npu_mid")
     if npu and size != 16 * GRID:
-        raise ValueError(f"npu_slim detection wants --size {16 * GRID} (4 pools -> {GRID}x{GRID} grid)")
+        raise ValueError(f"{backbone} detection wants --size {16 * GRID} (4 pools -> {GRID}x{GRID} grid)")
     ds = YoloDataset(data_dir, size=size, augment=True)
     val = YoloDataset(data_dir, size=size, augment=False)
     n_classes = len(ds.classes)
     anchors = kmeans_anchors(ds)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate)
-    model = (npu_det(n_classes) if npu
+    model = (npu_det(n_classes, width="mid" if backbone == "npu_mid" else "slim") if npu
              else YoloV2Slim(n_classes, pretrained=pretrained)).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     emit("start", classes=ds.classes, n_train=len(ds), anchors=anchors, device=str(device))
@@ -296,7 +300,8 @@ def train_detection(
     ts.save(str(out))
     meta = {
         "task": "detection",
-        "backbone": "npu-det" if npu else "yolov2-slim-mbv2",
+        "backbone": ("npu-det-mid" if backbone == "npu_mid" else "npu-det") if npu
+        else "yolov2-slim-mbv2",
         "size": size,
         "grid": GRID,
         "anchors": anchors,
