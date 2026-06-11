@@ -105,6 +105,15 @@ pub struct KbdkApp {
     /// arrival times of recent board frames, for the preview fps readout
     pub frame_times: std::collections::VecDeque<std::time::Instant>,
 
+    // board performance monitor (deploy tab; sampled every ~2 s while running)
+    pub perf_ms: Vec<[f64; 2]>,       // (t secs, inference latency ms)
+    pub perf_cam_fps: Vec<[f64; 2]>,  // (t, camera frames/s)
+    pub perf_inf_rate: Vec<[f64; 2]>, // (t, inferences/s)
+    pub perf_load: f32,
+    pub perf_mem_kb: u64,
+    pub perf_rss_kb: u64,
+    perf_prev: Option<(f64, u64, u64)>, // (t, frames, infers) for rate deltas
+
     // dataset capture (from the live board camera)
     pub last_frame: Option<(usize, usize, Vec<u8>)>,
     pub burst: bool,
@@ -114,6 +123,14 @@ pub struct KbdkApp {
     frame_count: u32,
     shot_requested: bool,
     started: std::time::Instant,
+}
+
+/// Keep the perf-plot vectors bounded (~8 min of 2 s samples).
+fn push_capped(v: &mut Vec<[f64; 2]>, p: [f64; 2]) {
+    v.push(p);
+    if v.len() > 240 {
+        v.remove(0);
+    }
 }
 
 /// Test hook: `KBDK_FIELDS=key=val,key=val` overrides persisted form fields at
@@ -187,6 +204,13 @@ impl KbdkApp {
             board_note: String::new(),
             cam_tex: None,
             frame_times: std::collections::VecDeque::new(),
+            perf_ms: vec![],
+            perf_cam_fps: vec![],
+            perf_inf_rate: vec![],
+            perf_load: 0.0,
+            perf_mem_kb: 0,
+            perf_rss_kb: 0,
+            perf_prev: None,
             last_frame: None,
             burst: false,
             captured_n: 0,
@@ -319,6 +343,11 @@ impl KbdkApp {
                     Ok(()) => {
                         self.running = true;
                         self.board_note = "runner started".into();
+                        // fresh perf history per run (counters reset with kbrun)
+                        self.perf_ms.clear();
+                        self.perf_cam_fps.clear();
+                        self.perf_inf_rate.clear();
+                        self.perf_prev = None;
                     }
                     Err(e) => self.board_note = format!("start failed: {e}"),
                 },
@@ -326,7 +355,28 @@ impl KbdkApp {
                     self.running = false;
                     self.board_note = "stopped".into();
                 }
-                Msg::BoardResult(v) => self.last_result = Some(v),
+                Msg::BoardResult(v) => {
+                    if let Some(ms) = v["ms"].as_f64() {
+                        let t = self.started.elapsed().as_secs_f64();
+                        push_capped(&mut self.perf_ms, [t, ms]);
+                    }
+                    self.last_result = Some(v);
+                }
+                Msg::BoardStats { load1, mem_kb, rss_kb, frames, infers } => {
+                    self.perf_load = load1;
+                    self.perf_mem_kb = mem_kb;
+                    self.perf_rss_kb = rss_kb;
+                    let t = self.started.elapsed().as_secs_f64();
+                    if let Some((pt, pf, pi)) = self.perf_prev {
+                        let dt = t - pt;
+                        // counters reset when a runner restarts -> skip that sample
+                        if dt > 0.1 && frames >= pf && infers >= pi {
+                            push_capped(&mut self.perf_cam_fps, [t, (frames - pf) as f64 / dt]);
+                            push_capped(&mut self.perf_inf_rate, [t, (infers - pi) as f64 / dt]);
+                        }
+                    }
+                    self.perf_prev = Some((t, frames, infers));
+                }
                 Msg::BoardFrame { w, h, rgb } => {
                     let img = egui::ColorImage::from_rgb([w, h], &rgb);
                     match &mut self.cam_tex {

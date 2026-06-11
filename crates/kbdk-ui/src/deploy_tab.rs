@@ -4,6 +4,7 @@
 use crate::app::KbdkApp;
 use crate::theme;
 use eframe::egui;
+use egui_plot::{Line, Plot, PlotPoints};
 use std::path::{Path, PathBuf};
 
 pub struct PackInfo {
@@ -392,6 +393,69 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
             }
         });
     }
+    // ---- board performance monitor (samples arrive every ~2 s while running) ----
+    if app.running || !app.perf_ms.is_empty() {
+        ui.add_space(10.0);
+        egui::Frame::default()
+            .fill(theme::CRUST)
+            .corner_radius(8.0)
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Board performance").strong());
+                    ui.separator();
+                    ui.colored_label(theme::SUBTEXT, format!("CPU load {:.2}", app.perf_load));
+                    ui.colored_label(
+                        theme::SUBTEXT,
+                        format!("mem free {:.1} MB", app.perf_mem_kb as f64 / 1024.0),
+                    );
+                    if app.perf_rss_kb > 0 {
+                        ui.colored_label(
+                            theme::SUBTEXT,
+                            format!("kbrun {:.1} MB", app.perf_rss_kb as f64 / 1024.0),
+                        );
+                    }
+                    if let Some(last) = app.perf_inf_rate.last() {
+                        ui.colored_label(theme::GREEN, format!("{:.1} infer/s", last[1]));
+                    }
+                    if let Some(last) = app.perf_cam_fps.last() {
+                        ui.colored_label(theme::BLUE, format!("{:.1} cam fps", last[1]));
+                    }
+                    if let Some(last) = app.perf_ms.last() {
+                        ui.colored_label(theme::PEACH, format!("{:.0} ms/inf", last[1]));
+                    }
+                });
+                ui.add_space(4.0);
+                ui.columns(2, |cols| {
+                    cols[0].label(egui::RichText::new("inference latency (ms)").color(theme::PEACH));
+                    Plot::new("perf_ms")
+                        .height(150.0)
+                        .include_y(0.0)
+                        .show(&mut cols[0], |p| {
+                            p.line(
+                                Line::new("ms", PlotPoints::from(app.perf_ms.clone()))
+                                    .color(theme::PEACH),
+                            );
+                        });
+                    cols[1].label(egui::RichText::new("camera fps / inferences per second").color(theme::GREEN));
+                    Plot::new("perf_rates")
+                        .height(150.0)
+                        .include_y(0.0)
+                        .legend(egui_plot::Legend::default())
+                        .show(&mut cols[1], |p| {
+                            p.line(
+                                Line::new("cam fps", PlotPoints::from(app.perf_cam_fps.clone()))
+                                    .color(theme::BLUE),
+                            );
+                            p.line(
+                                Line::new("infer/s", PlotPoints::from(app.perf_inf_rate.clone()))
+                                    .color(theme::GREEN),
+                            );
+                        });
+                });
+            });
+    }
+
     if app.running && !show_feed {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
