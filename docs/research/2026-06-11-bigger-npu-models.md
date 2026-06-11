@@ -70,6 +70,11 @@ channels 32→128, 1000-class 1×1 head, 1.49 MB int8 weights, 1.71 MB ION —
 
 ## Caveats
 
+- **The NPU is single-tenant** (found after this report): concurrent nna_runner
+  instances — e.g. probe scripts while a kbrun nvdla pack serves — silently
+  corrupt each other's results and inflate latencies. The numbers in this doc
+  were measured with kbrun stopped; nna_runner now enforces this (rc 5).
+
 - The ION probe was a single contiguous buffer on an idle board; with kbrun +
   camera running, budget ~16–20 MB to be safe.
 - Synthetic-net latency used random weights; real packs add CPU-side softmax /

@@ -168,7 +168,21 @@ Hard-won facts baked into kbdk (don't re-learn these):
   int8 ncnn on CPU** — inference outruns the 30 fps camera (infers ≈ frames in
   kbrun). The toy pack is byte-exact host-sim↔board on 12/12 images. Depthwise is
   NOT supported by nv_small — MobileNet-style nets can't go on the NPU; that's why
-  npu_slim exists. `npu_mid` is the wider variant (112², channels 32→128, 7×7-conv
+  npu_slim exists. `npu_repvgg` is the **ImageNet-pretrained transfer backbone**:
+  timm RepVGG-B0, branch-fused (reparameterized) to plain 3×3 convs, truncated to
+  stem+stages 0–1 (11 convs, ≤128 ch — deeper stages exceed the envelope), the
+  ImageNet mean/std folded into the stem (exact except a 1-px border; kbdk's
+  (x−128) input quant unchanged), flattened into a kbdk Sequential + fresh
+  conv/maxpool/7×7 head (pool beats a stride-2 conv by ~5 pts few-shot; the
+  fused PDP pool costs ~0.7 ms). timm is a train-time-only dep; the compiler
+  rebuilds from the flat constructor. 10-shot imagenette: 48.7% vs 35.5%
+  scratch; full-data ~84% float / ~7.5 ms on the NPU. Quant note: real-photo
+  packs lose ~5-9 pts to per-tensor int8 PTQ (close logits, 14-conv error
+  accumulation) — per-channel quant is the known fix.
+  **The NPU is single-tenant**: a second nna_runner (e.g. parity/verify scripts
+  while a kbrun nvdla pack is live) used to corrupt results SILENTLY — ghost
+  outputs, inflated latencies. nna_runner now refuses to start (rc 5) if
+  another instance is alive; stop kbrun before NPU scripts. `npu_mid` is the wider variant (112², channels 32→128, 7×7-conv
   head — kernel size parity-verified) for accuracy headroom: ~350 KB int8, still
   far above camera rate; the same `width="mid"` option widens npu_det
   (meta/manifest backbone "npu-det-mid"). Envelope + capacity numbers:
