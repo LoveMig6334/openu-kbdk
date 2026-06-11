@@ -83,11 +83,23 @@ cadence past every-3rd-frame: the adbd transfer competes with inference on the s
 A7 (15 fps about doubles forward() wall time; at 10 fps it's ~640→950 ms, and only
 while a client is fetching — idle cost is unchanged). The tab also has **dataset
 capture**: 📷 Capture / burst save frames as PNGs into
-`<dataset>/<class>/` ImageFolder layout for the Train tab. Verification hooks
-(used by automated checks, harmless otherwise): `--screenshot PATH` (self-captures
-the viewport — no macOS screen-recording permission needed), `--tab train|convert|deploy`,
-`KBDK_SHOT_DELAY=secs`, `KBDK_AUTOTRAIN=1`, `KBDK_AUTOCONVERT=1`, `KBDK_POLL=1`
-(start the board log poller as if Run was clicked). egui 0.34 gotchas already
+`<dataset>/<class>/` ImageFolder layout for the Train tab. The **NPU pipeline is
+first-class in the UI**: the Train tab has task (classification/detection) +
+backbone selectors incl. `npu_slim` (input size auto-set: 64 cls / 112 det;
+detection accepts YOLO-layout datasets and plots det_rate), and the Convert tab
+has a Target selector — CPU (int8 ncnn) or NPU (NVDLA, runs `kbdk-nvdla` =
+`kbdk_convert.nvdla_compile` and shows the int8-vs-float parity). UI **zoom
+defaults to 1.25× native** (set via `set_zoom_factor` — never `set_pixels_per_point`,
+which fights retina scaling); Cmd+± changes persist via the `ui_zoom` field.
+Verification hooks (used by automated checks, harmless otherwise):
+`--screenshot PATH` (self-captures the viewport — no macOS screen-recording
+permission needed), `--tab train|convert|deploy`, `KBDK_SHOT_DELAY=secs`,
+`KBDK_AUTOTRAIN=1`, `KBDK_AUTOCONVERT=1`, `KBDK_POLL=1` (start the board log
+poller as if Run was clicked), and `KBDK_FIELDS=key=val,…` (override persisted
+form fields — data_dir/backbone/task/runtime/epochs/size/model_out/pack_name —
+so the auto hooks can drive specific configurations). Note the test window opens
+focused on the desktop: a human at the machine clicking around shows up in
+long-delay screenshots (seen live; not a bug). egui 0.34 gotchas already
 handled: `App::ui` + `Panel::*::show_inside` (not `update`/`show`), egui_plot 0.35
 pairs with egui 0.34, persistence needs the eframe `persistence` feature, and
 `TextEdit` inside `Grid` collapses to minimum width (use horizontal rows +

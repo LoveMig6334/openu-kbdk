@@ -10,8 +10,9 @@ mod workers;
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1060.0, 720.0])
-            .with_min_inner_size([800.0, 560.0])
+            // roomy enough that the default 1.25x zoom still fits the layout
+            .with_inner_size([1320.0, 900.0])
+            .with_min_inner_size([900.0, 620.0])
             .with_title("kbdk — KidBright µAI dev-kit"),
         ..Default::default()
     };

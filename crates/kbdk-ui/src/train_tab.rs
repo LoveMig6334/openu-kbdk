@@ -15,10 +15,9 @@ pub fn on_event(app: &mut KbdkApp, e: PyEvent) {
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
             app.train_status = format!(
-                "training on {} — {} train / {} val, classes: {}",
+                "training on {} — {} train, classes: {}",
                 v["device"].as_str().unwrap_or("?"),
                 v["n_train"],
-                v["n_val"],
                 app.train_classes.join(", ")
             );
         }
@@ -27,7 +26,9 @@ pub fn on_event(app: &mut KbdkApp, e: PyEvent) {
             if let Some(loss) = v["loss"].as_f64() {
                 app.epoch_loss.push([n, loss]);
             }
-            if let Some(acc) = v["val_acc"].as_f64() {
+            // classification reports val_acc, detection reports det_rate —
+            // both land on the same 0..1 quality plot
+            if let Some(acc) = v["val_acc"].as_f64().or_else(|| v["det_rate"].as_f64()) {
                 app.epoch_acc.push([n, acc]);
             }
         }
@@ -43,7 +44,13 @@ pub fn on_event(app: &mut KbdkApp, e: PyEvent) {
     }
 }
 
-fn dataset_summary(dir: &std::path::Path) -> Option<String> {
+fn dataset_summary(dir: &std::path::Path, task: &str) -> Option<String> {
+    if task == "detection" {
+        // YOLO/Darknet layout: images/, labels/, classes.txt
+        let classes = std::fs::read_to_string(dir.join("classes.txt")).ok()?;
+        let n = std::fs::read_dir(dir.join("images")).ok()?.count();
+        return Some(format!("{} classes, {n} images (YOLO)", classes.split_whitespace().count()));
+    }
     let classes: Vec<String> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -60,6 +67,15 @@ fn dataset_summary(dir: &std::path::Path) -> Option<String> {
     Some(format!("{} classes, {n} images", classes.len()))
 }
 
+/// The input size each task/backbone combination is built for.
+fn default_size(task: &str, backbone: &str) -> u32 {
+    match (task, backbone) {
+        ("detection", "npu_slim") => 112, // npu_det: 4 pools -> 7x7 grid
+        (_, "npu_slim") => 64,            // npu_slim classifier
+        _ => 224,
+    }
+}
+
 /// Kick off training with the current fields (the Train button's action; also
 /// driven by the KBDK_AUTOTRAIN test hook).
 pub fn start(app: &mut KbdkApp) {
@@ -73,6 +89,8 @@ pub fn start(app: &mut KbdkApp) {
         root.join(&app.f.data_dir).display().to_string(),
         "--out".into(),
         root.join(&app.f.model_out).display().to_string(),
+        "--task".into(),
+        app.f.task.clone(),
         "--backbone".into(),
         app.f.backbone.clone(),
         "--epochs".into(),
@@ -83,11 +101,23 @@ pub fn start(app: &mut KbdkApp) {
 }
 
 pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
-    ui.heading("Fine-tune a classifier");
+    ui.heading("Train a model");
     ui.add_space(6.0);
 
+    let (prev_task, prev_backbone) = (app.f.task.clone(), app.f.backbone.clone());
+
     egui::Grid::new("train_grid").num_columns(3).spacing([10.0, 8.0]).show(ui, |ui| {
-        ui.label("Dataset (ImageFolder)");
+        ui.label("Task");
+        egui::ComboBox::from_id_salt("task")
+            .selected_text(&app.f.task)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.f.task, "classification".into(), "classification (ImageFolder dataset)");
+                ui.selectable_value(&mut app.f.task, "detection".into(), "detection (YOLO dataset: images/ labels/ classes.txt)");
+            });
+        ui.label("");
+        ui.end_row();
+
+        ui.label(if app.f.task == "detection" { "Dataset (YOLO)" } else { "Dataset (ImageFolder)" });
         ui.add(egui::TextEdit::singleline(&mut app.f.data_dir).desired_width(380.0));
         ui.horizontal(|ui| {
             if ui.button("Browse…").clicked() {
@@ -95,9 +125,9 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
                     app.f.data_dir = d.display().to_string();
                 }
             }
-            match dataset_summary(&app.workers.repo_root.join(&app.f.data_dir)) {
+            match dataset_summary(&app.workers.repo_root.join(&app.f.data_dir), &app.f.task) {
                 Some(s) => ui.colored_label(theme::GREEN, s),
-                None => ui.colored_label(theme::YELLOW, "no class subdirs found"),
+                None => ui.colored_label(theme::YELLOW, "dataset layout not recognized"),
             };
         });
         ui.end_row();
@@ -106,15 +136,18 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
         egui::ComboBox::from_id_salt("backbone")
             .selected_text(&app.f.backbone)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut app.f.backbone, "mobilenet_v2".into(), "mobilenet_v2 (default, ~470 ms on board)");
-                ui.selectable_value(&mut app.f.backbone, "resnet18".into(), "resnet18 (slow on board: ~6 s int8)");
+                ui.selectable_value(&mut app.f.backbone, "mobilenet_v2".into(), "mobilenet_v2 (CPU int8: ~470 ms cls / ~720 ms det)");
+                if app.f.task == "classification" {
+                    ui.selectable_value(&mut app.f.backbone, "resnet18".into(), "resnet18 (slow on board: ~6 s int8)");
+                }
+                ui.selectable_value(&mut app.f.backbone, "npu_slim".into(), "npu_slim (NPU: 1.9 ms cls @64² / 3 ms det @112²)");
             });
         ui.label("");
         ui.end_row();
 
         ui.label("Epochs / input size");
         ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut app.f.epochs).range(1..=50));
+            ui.add(egui::DragValue::new(&mut app.f.epochs).range(1..=200));
             ui.label("epochs @");
             ui.add(egui::DragValue::new(&mut app.f.size).range(64..=224).speed(8));
             ui.label("px");
@@ -127,6 +160,15 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
         ui.label("");
         ui.end_row();
     });
+
+    // task/backbone changes re-seed the input size with that combo's default
+    // (npu_slim nets are fixed-size; resnet18 has no detection head)
+    if app.f.task != prev_task || app.f.backbone != prev_backbone {
+        if app.f.task == "detection" && app.f.backbone == "resnet18" {
+            app.f.backbone = "mobilenet_v2".into();
+        }
+        app.f.size = default_size(&app.f.task, &app.f.backbone);
+    }
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -150,7 +192,7 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
         Plot::new("loss_plot").height(260.0).show(&mut cols[0], |p| {
             p.line(Line::new("loss", PlotPoints::from(app.epoch_loss.clone())).color(theme::PEACH));
         });
-        cols[1].label(egui::RichText::new("val accuracy").color(theme::GREEN));
+        cols[1].label(egui::RichText::new("val accuracy / det rate").color(theme::GREEN));
         Plot::new("acc_plot")
             .height(260.0)
             .include_y(0.0)

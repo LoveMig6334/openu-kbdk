@@ -5,19 +5,39 @@ use crate::{convert_tab, deploy_tab, theme, train_tab};
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver};
 
-#[derive(PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Tab {
     Train,
     Convert,
     Deploy,
 }
 
+fn default_task() -> String {
+    "classification".into()
+}
+fn default_runtime() -> String {
+    "ncnn".into()
+}
+fn default_zoom() -> f32 {
+    1.25
+}
+
 /// Everything the user typed — persisted across sessions via eframe Storage.
+/// New fields need `#[serde(default…)]` so storage from older builds still loads.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Fields {
     pub tab: Tab,
     pub data_dir: String,
     pub backbone: String,
+    /// "classification" | "detection" (kbdk-train --task)
+    #[serde(default = "default_task")]
+    pub task: String,
+    /// convert target: "ncnn" (CPU) | "nvdla" (NPU)
+    #[serde(default = "default_runtime")]
+    pub runtime: String,
+    /// UI zoom factor (multiplies the native scale); Cmd+± changes persist here
+    #[serde(default = "default_zoom")]
+    pub ui_zoom: f32,
     pub epochs: u32,
     pub size: u32,
     pub model_out: String,
@@ -34,6 +54,9 @@ impl Default for Fields {
             tab: Tab::Train,
             data_dir: "examples/toy-dataset".into(),
             backbone: "mobilenet_v2".into(),
+            task: default_task(),
+            runtime: default_runtime(),
+            ui_zoom: default_zoom(),
             epochs: 5,
             size: 224,
             model_out: "models/model.pt".into(),
@@ -93,15 +116,41 @@ pub struct KbdkApp {
     started: std::time::Instant,
 }
 
+/// Test hook: `KBDK_FIELDS=key=val,key=val` overrides persisted form fields at
+/// startup, so automated checks (KBDK_AUTOTRAIN / KBDK_AUTOCONVERT / screenshots)
+/// can drive specific configurations headlessly. Harmless otherwise.
+fn apply_field_overrides(f: &mut Fields) {
+    let Ok(spec) = std::env::var("KBDK_FIELDS") else { return };
+    for kv in spec.split(',') {
+        let Some((k, v)) = kv.split_once('=') else { continue };
+        match k.trim() {
+            "data_dir" => f.data_dir = v.into(),
+            "backbone" => f.backbone = v.into(),
+            "task" => f.task = v.into(),
+            "runtime" => f.runtime = v.into(),
+            "epochs" => f.epochs = v.parse().unwrap_or(f.epochs),
+            "size" => f.size = v.parse().unwrap_or(f.size),
+            "model_out" => f.model_out = v.into(),
+            "pack_name" => f.pack_name = v.into(),
+            _ => eprintln!("KBDK_FIELDS: unknown key {k}"),
+        }
+    }
+}
+
 impl KbdkApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
-        cc.egui_ctx.set_pixels_per_point(1.1);
 
-        let f: Fields = cc
+        let mut f: Fields = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
+        apply_field_overrides(&mut f);
+
+        // zoom_factor multiplies the native scale (a hardcoded
+        // set_pixels_per_point used to *shrink* the UI on retina displays);
+        // Cmd+± adjustments are saved back into f.ui_zoom on exit.
+        cc.egui_ctx.set_zoom_factor(f.ui_zoom.clamp(0.5, 3.0));
 
         let (tx, rx) = channel();
         let workers = Workers {
@@ -166,19 +215,26 @@ impl KbdkApp {
             app.f.capture_class = "class_a".into();
             app.burst = true;
         }
+        // KBDK_FIELDS (when set) supplies the configuration; otherwise the
+        // auto hooks fall back to their classic uitest defaults.
+        let fields_overridden = std::env::var("KBDK_FIELDS").is_ok();
         if std::env::var("KBDK_AUTOTRAIN").is_ok() {
             app.f.tab = Tab::Train;
-            app.f.data_dir = "examples/toy-dataset".into();
-            app.f.model_out = "models/uitest/model.pt".into();
-            app.f.epochs = 4;
-            app.f.size = 64;
+            if !fields_overridden {
+                app.f.data_dir = "examples/toy-dataset".into();
+                app.f.model_out = "models/uitest/model.pt".into();
+                app.f.epochs = 4;
+                app.f.size = 64;
+            }
             train_tab::start(&mut app);
         }
         if std::env::var("KBDK_AUTOCONVERT").is_ok() {
             app.f.tab = Tab::Convert;
-            app.f.data_dir = "examples/toy-dataset".into();
-            app.f.pack_name = "uitest".into();
-            app.f.size = 64;
+            if !fields_overridden {
+                app.f.data_dir = "examples/toy-dataset".into();
+                app.f.pack_name = "uitest".into();
+                app.f.size = 64;
+            }
             let m = convert_tab::default_model(&app);
             convert_tab::start(&mut app, m);
         }
@@ -357,6 +413,8 @@ impl KbdkApp {
 
 impl eframe::App for KbdkApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // keep Cmd+± zoom adjustments for the next launch
+        self.f.ui_zoom = self.workers.ctx.zoom_factor();
         eframe::set_value(storage, eframe::APP_KEY, &self.f);
     }
 
