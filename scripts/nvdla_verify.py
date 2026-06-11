@@ -49,8 +49,9 @@ def main() -> int:
     classes = manifest["labels"]
     imgs, _, labels = nvdla_compile.load_calib_images(a.data, a.size)
 
-    from kbdk_train.train import npu_mid, npu_slim
-    ctor = {"npu_slim": npu_slim, "npu_mid": npu_mid}[manifest.get("backbone", "npu_slim")]
+    from kbdk_train.train import npu_mid, npu_repvgg, npu_slim
+    ctor = {"npu_slim": npu_slim, "npu_mid": npu_mid,
+            "npu_repvgg": npu_repvgg}[manifest.get("backbone", "npu_slim")]
     model = ctor(len(classes)).eval()
     model.load_state_dict(torch.jit.load(str(a.model), map_location="cpu").state_dict())
     qlayers, _ = nvdla_compile.quantize_slim(

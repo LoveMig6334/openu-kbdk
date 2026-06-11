@@ -303,6 +303,28 @@ int main(int argc, char **argv) {
 
     signal(SIGALRM, on_alarm);
 
+    /* The NPU is single-tenant: a second nna_runner interleaving CONV/SDP
+     * programming and ION buffers corrupts results SILENTLY (learned the hard
+     * way — a live kbrun serve child turned one-shot verify runs into ghost
+     * outputs). Refuse to start if another instance is alive. */
+    {
+        FILE *pf = popen("pidof nna_runner", "r");
+        if (pf) {
+            char buf[128] = {0};
+            if (fgets(buf, sizeof buf, pf)) {
+                int others = 0;
+                for (char *tok = strtok(buf, " \n"); tok; tok = strtok(NULL, " \n"))
+                    if (atoi(tok) != getpid()) others++;
+                if (others) {
+                    pclose(pf);
+                    printf("{\"event\":\"error\",\"msg\":\"another nna_runner is using the NPU (stop kbrun first)\"}\n");
+                    return 5;
+                }
+            }
+            pclose(pf);
+        }
+    }
+
     nna_configure(nna_cmd_clk, 400);
     nna_on();
     void *r = xreg_open();

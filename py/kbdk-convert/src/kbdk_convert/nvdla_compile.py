@@ -373,11 +373,11 @@ def main(argv=None) -> int:
         print(json.dumps({"event": "saved", "pack": str(out_dir), **info}))
         return 0
 
-    size = a.size or {"npu_slim": 64, "npu_mid": 112}[a.backbone]
+    size = a.size or {"npu_slim": 64, "npu_mid": 112, "npu_repvgg": 112}[a.backbone]
     imgs, classes, labels = load_calib_images(a.data, size)
 
-    from kbdk_train.train import npu_mid, npu_slim
-    ctor = {"npu_slim": npu_slim, "npu_mid": npu_mid}[a.backbone]
+    from kbdk_train.train import npu_mid, npu_repvgg, npu_slim
+    ctor = {"npu_slim": npu_slim, "npu_mid": npu_mid, "npu_repvgg": npu_repvgg}[a.backbone]
     model = ctor(len(classes)).eval()
     model.load_state_dict(torch.jit.load(str(a.model), map_location="cpu").state_dict())
 

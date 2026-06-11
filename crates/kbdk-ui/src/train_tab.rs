@@ -71,6 +71,7 @@ fn dataset_summary(dir: &std::path::Path, task: &str) -> Option<String> {
 fn default_size(task: &str, backbone: &str) -> u32 {
     match (task, backbone) {
         (_, "npu_mid") => 112,            // npu_mid: fixed 112 (cls and det)
+        (_, "npu_repvgg") => 112,         // pretrained transfer: fixed 112
         ("detection", "npu_slim") => 112, // npu_det: 4 pools -> 7x7 grid
         (_, "npu_slim") => 64,            // npu_slim classifier
         _ => 224,
@@ -143,6 +144,9 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
                 }
                 ui.selectable_value(&mut app.f.backbone, "npu_slim".into(), "npu_slim (NPU: 1.9 ms cls @64² / 3 ms det @112²)");
                 ui.selectable_value(&mut app.f.backbone, "npu_mid".into(), "npu_mid (NPU, wider: ~5 ms @112², more accuracy headroom)");
+                if app.f.task == "classification" {
+                    ui.selectable_value(&mut app.f.backbone, "npu_repvgg".into(), "npu_repvgg (NPU, ImageNet-pretrained RepVGG-B0 transfer @112²)");
+                }
             });
         ui.label("");
         ui.end_row();
