@@ -2,6 +2,8 @@ pub mod adb;
 pub mod serial;
 pub mod deploy;
 pub mod discover;
+pub mod fs;
+pub mod procs;
 pub mod frames;
 pub mod pipeline;
 pub mod protocol;
