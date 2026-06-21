@@ -3,6 +3,8 @@
 mod app;
 mod convert_tab;
 mod deploy_tab;
+mod edit_tab;
+mod examples_tab;
 mod files_tab;
 mod hardware_tab;
 mod tasks_tab;
