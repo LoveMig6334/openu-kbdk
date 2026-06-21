@@ -39,6 +39,7 @@ pub enum Msg {
     DirListed { path: String, entries: Vec<kbdk_core::fs::DirEntry> },
     /// A file op finished; if `refresh_board` is set, re-list that board dir.
     FileOpDone { context: String, refresh_board: Option<String> },
+    PreviewLoaded { path: String, body: String, is_binary: bool },
 }
 
 /// One exec per poll tick: last result lines + the KBSTAT health sample
@@ -343,6 +344,25 @@ impl Workers {
         });
     }
 
+    pub fn preview_file(&self, path: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            let local = std::env::temp_dir().join("kbdk_preview_ui.bin");
+            let msg = match kbdk_core::fs::read_head(&t, &path, 64 * 1024, &local) {
+                Ok(bytes) => {
+                    let is_binary = kbdk_core::fs::looks_binary(&bytes);
+                    let body = if is_binary { hex_dump(&bytes) } else { String::from_utf8_lossy(&bytes).into_owned() };
+                    Msg::PreviewLoaded { path, body, is_binary }
+                }
+                Err(e) => Msg::OpError { context: format!("preview {path}"), message: e.to_string() },
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
     /// While running: stream camera preview frames — TCP via adb-forward when the
     /// board's kbrun serves them (~10-15 fps), else adb-pull of the tmpfs file
     /// (~2.5 fps) — plus the last result JSON-line every ~2 s.
@@ -436,6 +456,17 @@ impl Workers {
             let _ = std::fs::remove_file(&probs_local);
         });
     }
+}
+
+/// Classic 16-bytes-per-line hex dump for binary previews.
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = chunk.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
+        out.push_str(&format!("{:08x}  {:<47}  {}\n", i * 16, hex.join(" "), ascii));
+    }
+    out
 }
 
 #[cfg(test)]

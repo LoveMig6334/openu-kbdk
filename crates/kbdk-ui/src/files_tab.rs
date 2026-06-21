@@ -38,6 +38,7 @@ pub struct FilesState {
     pub board: FileTree,
     pub status: String,
     pub dialog: Option<FsDialog>,
+    pub preview: Option<(String, String, bool)>, // (path, body, is_binary)
 }
 
 impl FilesState {
@@ -47,6 +48,7 @@ impl FilesState {
             board: FileTree::new(board_root),
             status: String::new(),
             dialog: None,
+            preview: None,
         }
     }
 }
@@ -150,6 +152,20 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
         });
     });
 
+    if let Some((path, body, is_binary)) = app.files.preview.clone() {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("preview: {path}")).strong());
+            ui.label(egui::RichText::new(if is_binary { "binary (hex)" } else { "text" }).color(theme::SUBTEXT));
+            if ui.small_button("✕").clicked() {
+                app.files.preview = None;
+            }
+        });
+        egui::ScrollArea::vertical().id_salt("preview").max_height(180.0).show(ui, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(&body).monospace()).wrap());
+        });
+    }
+
     render_dialog(app, ui);
 }
 
@@ -221,6 +237,7 @@ fn row(ui: &mut egui::Ui, app: &mut KbdkApp, is_local: bool, full: &str, e: &Dir
                 app.files.local.selected = Some(full.to_string());
             } else {
                 app.files.board.selected = Some(full.to_string());
+                app.workers.preview_file(full.to_string());
             }
         }
         if !is_local {

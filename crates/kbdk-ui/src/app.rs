@@ -470,6 +470,9 @@ impl KbdkApp {
                         self.workers.list_dir(dir);
                     }
                 }
+                Msg::PreviewLoaded { path, body, is_binary } => {
+                    self.files.preview = Some((path, body, is_binary));
+                }
             }
         }
     }
