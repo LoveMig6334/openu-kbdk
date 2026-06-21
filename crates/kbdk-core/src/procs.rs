@@ -20,7 +20,7 @@ pub const PROC_SCAN_CMD: &str = "\
 for d in /proc/[0-9]*; do \
   p=${d#/proc/}; \
   r=$(awk '/^VmRSS:/{print $2}' \"$d/status\" 2>/dev/null); \
-  s=$(awk '{print $3}' \"$d/stat\" 2>/dev/null); \
+  s=$(awk -F') ' '{print substr($NF,1,1)}' \"$d/stat\" 2>/dev/null); \
   c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null); \
   c=$(echo \"$c\" | sed 's/ *$//'); \
   if [ -z \"$c\" ]; then n=$(awk '{print $2}' \"$d/stat\" 2>/dev/null); c=\"$n\"; fi; \
