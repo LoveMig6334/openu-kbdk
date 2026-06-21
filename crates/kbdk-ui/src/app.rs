@@ -130,6 +130,11 @@ pub struct KbdkApp {
     frame_count: u32,
     shot_requested: bool,
     started: std::time::Instant,
+
+    // tasks tab
+    pub procs: Vec<kbdk_core::procs::Proc>,
+    pub tasks_status: String,
+    pub kill_confirm: Option<(u32, String)>, // (pid, cmd) awaiting confirm
 }
 
 /// Keep the perf-plot vectors bounded (~8 min of 2 s samples).
@@ -227,6 +232,9 @@ impl KbdkApp {
             frame_count: 0,
             shot_requested: false,
             started: std::time::Instant::now(),
+            procs: vec![],
+            tasks_status: String::new(),
+            kill_confirm: None,
         };
         app.rescan_packs();
 
@@ -417,6 +425,17 @@ impl KbdkApp {
                     }
                 }
                 Msg::BoardNote(s) => self.board_note = s,
+                Msg::ProcList(v) => {
+                    self.procs = v;
+                    self.tasks_status = format!("{} processes", self.procs.len());
+                }
+                Msg::Killed { pid } => {
+                    self.tasks_status = format!("killed {pid}");
+                    self.procs.retain(|p| p.pid != pid);
+                }
+                Msg::OpError { context, message } => {
+                    self.tasks_status = format!("{context}: {message}");
+                }
             }
         }
     }

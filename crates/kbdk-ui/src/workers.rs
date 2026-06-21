@@ -33,6 +33,9 @@ pub enum Msg {
     /// Full class-probability vector (classification packs; every ~2 s).
     BoardProbs(Vec<f32>),
     BoardNote(String),
+    ProcList(Vec<kbdk_core::procs::Proc>),
+    Killed { pid: u32 },
+    OpError { context: String, message: String },
 }
 
 /// One exec per poll tick: last result lines + the KBSTAT health sample
@@ -222,6 +225,32 @@ impl Workers {
     /// Test hook: start only the log poller (board runner already started externally).
     pub fn run_pack_poll_only(&self) {
         self.start_log_poller();
+    }
+
+    pub fn list_procs(&self) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            match kbdk_core::procs::list_procs(&t) {
+                Ok(v) => { let _ = tx.send(Msg::ProcList(v)); }
+                Err(e) => { let _ = tx.send(Msg::OpError { context: "list processes".into(), message: e.to_string() }); }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn kill_proc(&self, pid: u32, sig: i32) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            match kbdk_core::procs::kill(&t, pid, sig) {
+                Ok(()) => { let _ = tx.send(Msg::Killed { pid }); }
+                Err(e) => { let _ = tx.send(Msg::OpError { context: format!("kill {pid}"), message: e.to_string() }); }
+            }
+            ctx.request_repaint();
+        });
     }
 
     /// While running: stream camera preview frames — TCP via adb-forward when the
