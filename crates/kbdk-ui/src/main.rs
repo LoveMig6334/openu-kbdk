@@ -3,6 +3,8 @@
 mod app;
 mod convert_tab;
 mod deploy_tab;
+mod files_tab;
+mod tasks_tab;
 mod theme;
 mod train_tab;
 mod workers;
