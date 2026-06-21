@@ -84,87 +84,107 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
     });
     ui.separator();
 
-    let avail_h = ui.available_height() - 8.0;
-    ui.horizontal_top(|ui| {
-        let pane_w = (ui.available_width() - 80.0) / 2.0;
-
-        // LEFT: local
-        ui.allocate_ui(egui::vec2(pane_w, avail_h), |ui| {
-            ui.group(|ui| {
-                ui.label(egui::RichText::new(format!("LOCAL  {}", app.files.local.root)).strong());
-                egui::ScrollArea::vertical()
-                    .id_salt("local_tree")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let root = app.files.local.root.clone();
-                        local_node(ui, app, &root);
+    // Bottom preview panel reserves its space before the trees claim the rest.
+    if app.files.preview.is_some() {
+        egui::Panel::bottom("files_preview")
+            .resizable(true)
+            .default_size(180.0)
+            .show_inside(ui, |ui| {
+                if let Some((path, body, is_binary)) = app.files.preview.clone() {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("preview: {path}")).strong());
+                        ui.label(
+                            egui::RichText::new(if is_binary { "binary (hex)" } else { "text" })
+                                .color(theme::SUBTEXT),
+                        );
+                        if ui.small_button("✕").clicked() {
+                            app.files.preview = None;
+                        }
                     });
+                    egui::ScrollArea::vertical().id_salt("preview").show(ui, |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(&body).monospace()).wrap());
+                    });
+                }
             });
+    }
+
+    let pane_w = ((ui.available_width() - 110.0) / 2.0).clamp(160.0, 640.0);
+
+    // LEFT: local filesystem
+    egui::Panel::left("files_local")
+        .resizable(true)
+        .default_size(pane_w)
+        .show_inside(ui, |ui| {
+            ui.label(egui::RichText::new(format!("LOCAL  {}", app.files.local.root)).strong());
+            egui::ScrollArea::vertical()
+                .id_salt("local_tree")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let root = app.files.local.root.clone();
+                    local_node(ui, app, &root);
+                });
         });
 
-        // CENTER: transfer + board-dir actions
-        ui.vertical(|ui| {
+    // RIGHT: board filesystem
+    egui::Panel::right("files_board")
+        .resizable(true)
+        .default_size(pane_w)
+        .show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("BOARD  {}", app.files.board.root)).strong());
+                if ui.small_button("⟳").clicked() {
+                    let root = app.files.board.root.clone();
+                    app.files.board.children.remove(&root);
+                    app.workers.list_dir(root);
+                }
+            });
+            egui::ScrollArea::vertical()
+                .id_salt("board_tree")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let root = app.files.board.root.clone();
+                    // fetch root once
+                    if !app.files.board.children.contains_key(&root) {
+                        app.workers.list_dir(root.clone());
+                        app.files.board.children.insert(root.clone(), vec![]);
+                    }
+                    board_node(ui, app, &root);
+                });
+        });
+
+    // CENTER: transfer + board-dir actions
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        ui.vertical_centered(|ui| {
             ui.add_space(40.0);
             let local_sel = app.files.local.selected.clone();
             let board_dir = current_board_dir(app);
-            if ui.add_enabled(local_sel.is_some(), egui::Button::new("push →")).clicked() {
+            if ui
+                .add_enabled(local_sel.is_some(), egui::Button::new("push →"))
+                .clicked()
+            {
                 if let Some(p) = local_sel {
                     app.workers.push_file(std::path::PathBuf::from(p), board_dir.clone());
                 }
             }
             let board_sel = app.files.board.selected.clone();
             let local_dir = current_local_dir(app);
-            if ui.add_enabled(board_sel.is_some(), egui::Button::new("← pull")).clicked() {
+            if ui
+                .add_enabled(board_sel.is_some(), egui::Button::new("← pull"))
+                .clicked()
+            {
                 if let Some(p) = board_sel {
                     app.workers.pull_file(p, std::path::PathBuf::from(local_dir));
                 }
             }
             ui.separator();
             if ui.button("＋ mkdir").clicked() {
-                app.files.dialog = Some(FsDialog::Mkdir { parent: board_dir.clone(), name: String::new() });
-            }
-        });
-
-        // RIGHT: board
-        ui.allocate_ui(egui::vec2(pane_w, avail_h), |ui| {
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("BOARD  {}", app.files.board.root)).strong());
-                    if ui.small_button("⟳").clicked() {
-                        let root = app.files.board.root.clone();
-                        app.files.board.children.remove(&root);
-                        app.workers.list_dir(root);
-                    }
+                app.files.dialog = Some(FsDialog::Mkdir {
+                    parent: board_dir.clone(),
+                    name: String::new(),
                 });
-                egui::ScrollArea::vertical()
-                    .id_salt("board_tree")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let root = app.files.board.root.clone();
-                        // fetch root once
-                        if !app.files.board.children.contains_key(&root) {
-                            app.workers.list_dir(root.clone());
-                            app.files.board.children.insert(root.clone(), vec![]);
-                        }
-                        board_node(ui, app, &root);
-                    });
-            });
+            }
         });
     });
-
-    if let Some((path, body, is_binary)) = app.files.preview.clone() {
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("preview: {path}")).strong());
-            ui.label(egui::RichText::new(if is_binary { "binary (hex)" } else { "text" }).color(theme::SUBTEXT));
-            if ui.small_button("✕").clicked() {
-                app.files.preview = None;
-            }
-        });
-        egui::ScrollArea::vertical().id_salt("preview").max_height(180.0).show(ui, |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(&body).monospace()).wrap());
-        });
-    }
 
     render_dialog(app, ui);
 }
