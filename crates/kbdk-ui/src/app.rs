@@ -463,6 +463,13 @@ impl KbdkApp {
                 Msg::DirListed { path, entries } => {
                     self.files.board.children.insert(path, entries);
                 }
+                Msg::FileOpDone { context, refresh_board } => {
+                    self.files.status = context;
+                    if let Some(dir) = refresh_board {
+                        self.files.board.children.remove(&dir);
+                        self.workers.list_dir(dir);
+                    }
+                }
             }
         }
     }

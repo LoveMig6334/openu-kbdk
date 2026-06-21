@@ -37,6 +37,8 @@ pub enum Msg {
     Killed { pid: u32 },
     OpError { context: String, message: String },
     DirListed { path: String, entries: Vec<kbdk_core::fs::DirEntry> },
+    /// A file op finished; if `refresh_board` is set, re-list that board dir.
+    FileOpDone { context: String, refresh_board: Option<String> },
 }
 
 /// One exec per poll tick: last result lines + the KBSTAT health sample
@@ -263,6 +265,80 @@ impl Workers {
                 Ok(entries) => { let _ = tx.send(Msg::DirListed { path, entries }); }
                 Err(e) => { let _ = tx.send(Msg::OpError { context: format!("ls {path}"), message: e.to_string() }); }
             }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn push_file(&self, local: std::path::PathBuf, remote_dir: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            let name = local.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let remote = kbdk_core::fs::join_path(&remote_dir, &name);
+            let msg = match t.push(&local, &remote) {
+                Ok(()) => Msg::FileOpDone { context: format!("pushed {name}"), refresh_board: Some(remote_dir) },
+                Err(e) => Msg::OpError { context: format!("push {name}"), message: e.to_string() },
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn pull_file(&self, remote: String, local_dir: std::path::PathBuf) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            let name = remote.rsplit('/').next().unwrap_or("file").to_string();
+            let dest = local_dir.join(&name);
+            let msg = match t.pull(&remote, &dest) {
+                Ok(()) => Msg::FileOpDone { context: format!("pulled {name}"), refresh_board: None },
+                Err(e) => Msg::OpError { context: format!("pull {name}"), message: e.to_string() },
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn fs_remove(&self, path: String, is_dir: bool, parent: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            let msg = match kbdk_core::fs::remove(&t, &path, is_dir) {
+                Ok(()) => Msg::FileOpDone { context: format!("removed {path}"), refresh_board: Some(parent) },
+                Err(e) => Msg::OpError { context: format!("rm {path}"), message: e.to_string() },
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn fs_chmod(&self, path: String, mode: String, parent: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            let msg = match kbdk_core::fs::chmod(&t, &path, &mode) {
+                Ok(()) => Msg::FileOpDone { context: format!("chmod {mode} {path}"), refresh_board: Some(parent) },
+                Err(e) => Msg::OpError { context: format!("chmod {path}"), message: e.to_string() },
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn fs_mkdir(&self, path: String, parent: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            let msg = match kbdk_core::fs::mkdir(&t, &path) {
+                Ok(()) => Msg::FileOpDone { context: format!("mkdir {path}"), refresh_board: Some(parent) },
+                Err(e) => Msg::OpError { context: format!("mkdir {path}"), message: e.to_string() },
+            };
+            let _ = tx.send(msg);
             ctx.request_repaint();
         });
     }

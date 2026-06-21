@@ -6,6 +6,13 @@ use eframe::egui;
 use kbdk_core::fs::DirEntry;
 use std::collections::{BTreeSet, HashMap};
 
+/// Modal state for the rm/chmod/mkdir actions.
+pub enum FsDialog {
+    ConfirmRm { path: String, is_dir: bool, parent: String },
+    Chmod { path: String, parent: String, mode: String },
+    Mkdir { parent: String, name: String },
+}
+
 /// One side of the dual pane. `children` is a lazy cache: a dir's entries are
 /// fetched (board) or read (local) the first time it's expanded.
 pub struct FileTree {
@@ -30,6 +37,7 @@ pub struct FilesState {
     pub local: FileTree,
     pub board: FileTree,
     pub status: String,
+    pub dialog: Option<FsDialog>,
 }
 
 impl FilesState {
@@ -38,6 +46,7 @@ impl FilesState {
             local: FileTree::new(local_root),
             board: FileTree::new(board_root),
             status: String::new(),
+            dialog: None,
         }
     }
 }
@@ -75,7 +84,7 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
 
     let avail_h = ui.available_height() - 8.0;
     ui.horizontal_top(|ui| {
-        let pane_w = (ui.available_width() - 16.0) / 2.0;
+        let pane_w = (ui.available_width() - 80.0) / 2.0;
 
         // LEFT: local
         ui.allocate_ui(egui::vec2(pane_w, avail_h), |ui| {
@@ -89,6 +98,29 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
                         local_node(ui, app, &root);
                     });
             });
+        });
+
+        // CENTER: transfer + board-dir actions
+        ui.vertical(|ui| {
+            ui.add_space(40.0);
+            let local_sel = app.files.local.selected.clone();
+            let board_dir = current_board_dir(app);
+            if ui.add_enabled(local_sel.is_some(), egui::Button::new("push →")).clicked() {
+                if let Some(p) = local_sel {
+                    app.workers.push_file(std::path::PathBuf::from(p), board_dir.clone());
+                }
+            }
+            let board_sel = app.files.board.selected.clone();
+            let local_dir = current_local_dir(app);
+            if ui.add_enabled(board_sel.is_some(), egui::Button::new("← pull")).clicked() {
+                if let Some(p) = board_sel {
+                    app.workers.pull_file(p, std::path::PathBuf::from(local_dir));
+                }
+            }
+            ui.separator();
+            if ui.button("＋ mkdir").clicked() {
+                app.files.dialog = Some(FsDialog::Mkdir { parent: board_dir.clone(), name: String::new() });
+            }
         });
 
         // RIGHT: board
@@ -117,6 +149,8 @@ pub fn show(app: &mut KbdkApp, ui: &mut egui::Ui) {
             });
         });
     });
+
+    render_dialog(app, ui);
 }
 
 /// Render the LOCAL subtree rooted at `path` (read synchronously on expand).
@@ -181,12 +215,31 @@ fn row(ui: &mut egui::Ui, app: &mut KbdkApp, is_local: bool, full: &str, e: &Dir
             app.files.board.selected.as_deref() == Some(full)
         };
         let label = format!("   📄 {}  {}", e.name, human_size(e.size));
-        if ui.selectable_label(selected, label).clicked() {
+        let resp = ui.selectable_label(selected, label);
+        if resp.clicked() {
             if is_local {
                 app.files.local.selected = Some(full.to_string());
             } else {
                 app.files.board.selected = Some(full.to_string());
             }
+        }
+        if !is_local {
+            let parent = full.rsplit_once('/').map(|(d, _)| if d.is_empty() { "/".to_string() } else { d.to_string() }).unwrap_or_else(|| "/".to_string());
+            resp.context_menu(|ui| {
+                if ui.button("pull").clicked() {
+                    let dir = current_local_dir(app);
+                    app.workers.pull_file(full.to_string(), std::path::PathBuf::from(dir));
+                    ui.close();
+                }
+                if ui.button("chmod…").clicked() {
+                    app.files.dialog = Some(FsDialog::Chmod { path: full.to_string(), parent: parent.clone(), mode: "755".into() });
+                    ui.close();
+                }
+                if ui.button("rm").clicked() {
+                    app.files.dialog = Some(FsDialog::ConfirmRm { path: full.to_string(), is_dir: false, parent: parent.clone() });
+                    ui.close();
+                }
+            });
         }
     }
 }
@@ -199,4 +252,80 @@ fn human_size(n: u64) -> String {
     } else {
         format!("{n}B")
     }
+}
+
+/// Board directory to act on: the selected board file's parent, else board root.
+fn current_board_dir(app: &KbdkApp) -> String {
+    match &app.files.board.selected {
+        Some(p) => p.rsplit_once('/').map(|(d, _)| if d.is_empty() { "/".into() } else { d.to_string() })
+            .unwrap_or_else(|| app.files.board.root.clone()),
+        None => app.files.board.root.clone(),
+    }
+}
+
+/// Local directory to pull into: the selected local file's parent, else root.
+fn current_local_dir(app: &KbdkApp) -> String {
+    match &app.files.local.selected {
+        Some(p) => std::path::Path::new(p).parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_else(|| app.files.local.root.clone()),
+        None => app.files.local.root.clone(),
+    }
+}
+
+fn render_dialog(app: &mut KbdkApp, ui: &mut egui::Ui) {
+    let Some(dialog) = app.files.dialog.take() else { return };
+    let mut keep: Option<FsDialog> = None;
+    match dialog {
+        FsDialog::ConfirmRm { path, is_dir, parent } => {
+            egui::Window::new("Delete?").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+                ui.label(format!("Remove {path} from the board?"));
+                ui.horizontal(|ui| {
+                    if ui.button(egui::RichText::new("Delete").color(theme::RED)).clicked() {
+                        app.workers.fs_remove(path.clone(), is_dir, parent.clone());
+                    } else if ui.button("Cancel").clicked() {
+                        // drop
+                    } else {
+                        keep = Some(FsDialog::ConfirmRm { path: path.clone(), is_dir, parent: parent.clone() });
+                    }
+                });
+            });
+        }
+        FsDialog::Chmod { path, parent, mut mode } => {
+            egui::Window::new("chmod").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("mode");
+                    ui.text_edit_singleline(&mut mode);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        app.workers.fs_chmod(path.clone(), mode.clone(), parent.clone());
+                    } else if ui.button("Cancel").clicked() {
+                        // drop
+                    } else {
+                        keep = Some(FsDialog::Chmod { path: path.clone(), parent: parent.clone(), mode: mode.clone() });
+                    }
+                });
+            });
+        }
+        FsDialog::Mkdir { parent, mut name } => {
+            egui::Window::new("New folder").collapsible(false).resizable(false).show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("name");
+                    ui.text_edit_singleline(&mut name);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Create").clicked() && !name.trim().is_empty() {
+                        let path = kbdk_core::fs::join_path(&parent, name.trim());
+                        app.workers.fs_mkdir(path, parent.clone());
+                    } else if ui.button("Cancel").clicked() {
+                        // drop
+                    } else {
+                        keep = Some(FsDialog::Mkdir { parent: parent.clone(), name: name.clone() });
+                    }
+                });
+            });
+        }
+    }
+    app.files.dialog = keep;
 }
