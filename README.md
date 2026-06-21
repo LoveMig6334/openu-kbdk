@@ -6,9 +6,14 @@ Linux 4.9 BusyBox/Tina, musl libc).
 Cross-compile C on the Mac, drive the board over USB (ADB gadget) or its serial
 console, and talk to the hardware **directly** (syscall / ioctl / mmap, or the
 vendor MPP API where the kernel forces it) — instead of going through the board's
-CodeBlock / MaixPy stack. The goal is full control over the screen, audio, camera
-(and eventually GPIO/NPU) for building AIoT projects without the vendor library's
-limits.
+CodeBlock / MaixPy stack. The goal is full control over the screen, audio, camera,
+and the **NPU** for building AIoT projects without the vendor library's limits.
+
+Screen, audio, and camera all work from raw C. The V831's NPU (an NVIDIA NVDLA
+`nv_small` core) runs CNN inference **from userspace with no kernel driver** — and
+`kbdk` (below) now compiles your own trained classification *and* detection models
+straight onto it: **1.9 ms/inf** for a 64² classifier, **3 ms/inf** for YOLO
+detection, byte-exact against the host simulation.
 
 ## kbdk: train on the Mac → run live on the board
 
@@ -30,11 +35,16 @@ uv run --with pillow --with numpy python examples/make_toy_dataset.py
 Prefer a GUI? `cargo run -p kbdk-ui` opens the desktop app (egui, Catppuccin
 Mocha): pick a dataset, watch live loss/accuracy curves while training on MPS,
 convert with an int8-parity check, then deploy and watch the board's live
-camera + classifications stream in. The Deploy & Run tab also lists the
-board's stock models (ImageNet ResNet-18 via the vendor AWNN runtime) and can
-**capture frames from the board camera into ImageFolder datasets** (single
-shot or burst) — point the camera at your objects, collect a dataset, train,
-deploy, all without leaving the app.
+camera + classifications stream in. The whole **NPU pipeline is first-class**:
+the Train tab has task (classification/detection) + backbone selectors
+(incl. the `npu_*` backbones), and the Convert tab has a CPU (int8 ncnn) vs
+NPU (NVDLA) target selector with a parity readout. The Deploy & Run tab also
+lists the board's stock models (ImageNet ResNet-18 via the vendor AWNN
+runtime), shows a **board performance monitor** (CPU/RAM/RSS, inference
+latency, camera-fps vs infers/s), lists **all classes** with live softmax in a
+scroll area, and can **capture frames from the board camera into ImageFolder
+datasets** (single shot or burst) — point the camera at your objects, collect a
+dataset, train, deploy, all without leaving the app.
 
 Train = PyTorch MPS — classification (MobileNetV2/ResNet18 transfer learning,
 ImageFolder datasets) **and object detection** (`--task detection`: YOLOv2-slim =
@@ -50,6 +60,39 @@ MPP camera capture, gray-world AWB, fb0 preview + label overlay, JSON-lines
 results over `kbdk log`. Measured: MobileNetV2-int8 @224 ≈ 470 ms/inf, preview
 ~27 fps concurrently.
 
+### Or run it on the NPU (NVDLA)
+
+`kbdk` also compiles models onto the V831's NPU, where inference outruns the
+30 fps camera (npu_slim is **1.9 ms/inf on the NPU vs ~10 ms** for the same net
+in int8 ncnn on the CPU). Pick an NPU backbone at train time, then compile with
+the NVDLA target instead of int8 ncnn:
+
+```sh
+# classification on the NPU
+kbdk train --data DIR --out models/m.pt --backbone npu_repvgg --size 112
+uv run --project py python -m kbdk_convert.nvdla_compile \
+    --model models/m.pt --data DIR --name mymodel        # -> packs/mymodel (runtime: nvdla)
+kbdk deploy packs/mymodel && kbdk run mymodel
+
+# detection on the NPU
+kbdk train --data DIR --task detection --backbone npu_slim --size 112
+uv run --project py python -m kbdk_convert.nvdla_compile --model models/m.pt --data DIR --name mydet
+```
+
+Backbones (all conv/BN/relu/maxpool — `nv_small` has **no depthwise**, so
+MobileNet-style nets can't go on the NPU; these are built to fit the core):
+- **`npu_slim`** — 64² (cls) / 112² (det), every conv ≤ 32 ch. **1.9 ms/inf** cls,
+  **3.0 ms/inf** det.
+- **`npu_mid`** — wider 112² variant (32→128 ch, ~350 KB int8) for more accuracy
+  headroom, still ~4.5 ms/inf.
+- **`npu_repvgg`** — **ImageNet-pretrained** transfer backbone (timm RepVGG-B0,
+  branch-fused to plain 3×3 convs); ~84% full-data on imagenette, ~7.5 ms/inf.
+
+`kbrun` stays MIT and spawns the GPLv3 `nna_runner` (built from `board/nvdla/` +
+`third_party/v831-npu/`) to drive the NPU; the compiler does BN-fold → per-tensor
+int8 PTQ → fused CONV/SDP/PDP NVDLA job, **pinned byte-exact against hardware**.
+The NPU is single-tenant — stop `kbrun` before running the parity/verify scripts.
+
 ## What works
 
 | Capability | Tool | How |
@@ -59,8 +102,10 @@ results over `kbdk log`. Measured: MobileNetV2-int8 @224 ≈ 470 ms/inf, preview
 | **Camera capture** | `cammpp` | Allwinner **MPP** `AW_MPI_VI`+ISP → NV21M frame (standard V4L2 streaming is not exposed on this BSP); optional raw-frame dump for host inspection |
 | **Live camera preview** | `campreview` | `AW_MPI_SYS_Bind(VI→VO)` — camera straight to the LCD, zero-copy in hardware (raw ISP colour) |
 | **Colour-corrected preview** | `camcc` | MPP capture → CPU white-balance + saturation → `/dev/fb0`; fixes the green/flat ISP colour, ~30 fps, vsync-synced |
-| GPIO / I²C / SPI | — | UAPI headers present; not yet written |
-| NPU | — | needs Allwinner's proprietary runtime; research item |
+| **NPU — your own models** | `kbdk` + `nna_runner` | trained classifier/detector compiled to an NVDLA job, run on the NPU from userspace (no kernel driver); 1.9 ms/inf cls, 3 ms/inf det, byte-exact vs host sim |
+| **NPU — raw CNN** | `nna-cifar10`, `nnaprobe` | hand-built CNN on the NPU via `/dev/mem`+`/dev/ion`+`/dev/cedar_dev` (GPLv3 `third_party/v831-npu`); `nnaprobe` = read-only bring-up probe |
+| **CNN inference (CPU/AWNN)** | `nncls`, `nnacam` | board's `libmaix_nn.so` (quantized-ncnn fork); `nnacam` = live camera → ImageNet ResNet-18 label on the LCD (~80 ms/inf, runs on CPU as this kernel lacks the NPU driver) |
+| GPIO / I²C / SPI / buttons | — | UAPI headers present; not yet written |
 
 ## Board facts
 - SoC **Allwinner V831** (`sun8iw19p1`), Cortex-A7 armv7l hard-float NEON/VFPv4,
@@ -75,7 +120,7 @@ results over `kbdk log`. Measured: MobileNetV2-int8 @224 ≈ 470 ms/inf, preview
 kidbright-uai/
 ├── Makefile
 ├── CLAUDE.md                      # deep notes for the codebase (hardware, gotchas)
-├── src/
+├── src/                           # board C/C++ programs (cross-compiled) + host uai.c
 │   ├── uai.c                      # host serial toolkit (native macOS arm64)
 │   ├── hello.c                    # board smoke-test (printf + sqrt → hard-float)
 │   ├── fbtest.c                   # framebuffer probe + test pattern (screen)
@@ -84,11 +129,28 @@ kidbright-uai/
 │   ├── camdiag.c    camread.c     # V4L2 buffer-ABI + read() diagnostics
 │   ├── cammpp.c                   # MPP camera capture (one NV21M frame; can dump raw to a file)
 │   ├── campreview.c               # MPP live preview on the panel (VI→VO bind, raw colour)
-│   └── camcc.c                    # colour-corrected live preview (MPP capture → CPU WB/sat → fb0)
+│   ├── camcc.c                    # colour-corrected live preview (MPP capture → CPU WB/sat → fb0)
+│   ├── nncls.c     nnacam.cpp     # CNN inference via the board's AWNN runtime (CPU); live ImageNet on the LCD
+│   └── nnaprobe.c                 # read-only NPU/NVDLA bring-up probe (no driver)
+├── crates/                        # kbdk Rust workspace
+│   ├── kbdk-core/                 # library: board I/O, pipeline, frame stream
+│   ├── kbdk-cli/                  # the `kbdk` CLI (devices/train/convert/deploy/run/log/stop)
+│   └── kbdk-ui/                   # egui desktop app (Train/Convert/Deploy tabs)
+├── py/                            # Python workspace (uv)
+│   ├── kbdk-train/                # PyTorch MPS training (classification + detection)
+│   └── kbdk-convert/             # pnnx→ncnn→int8 packer + NVDLA compiler (nvdla_compile)
+├── board/
+│   ├── runner/kbrun.cpp           # board runner: ncnn + AWNN + NVDLA engines, MPP camera
+│   ├── nvdla/nna_runner.cpp       # GPLv3 NPU job executor (kbrun spawns it for nvdla packs)
+│   └── ncnn/                      # pinned vanilla ncnn build → static board lib + host quantize tools
+├── third_party/v831-npu/          # GPLv3 userspace NVDLA driver (mtx512) — raw NPU access
+├── board-models/imagenet-resnet18/ # AWNN pack for the stock vendor ImageNet model
+├── examples/                      # toy dataset + toy detection generators
+├── scripts/                       # nvdla_parity/verify, eval, serial transfer fallback
 ├── captures/nv21.py               # host tool: decode dumped NV21 → PPM + colour stats (stdlib only)
 ├── vendor/eyesee-mpp/sun8iw19p1/  # vendored Allwinner MPP headers (V831 ABI) for the camera
-├── scripts/serial_transfer_run.py # original pyserial transfer (reference/fallback)
-└── bin/                           # build output (gitignored)
+├── docs/                          # specs, plans, research notes
+└── bin/ packs/ models/            # build + pipeline output (gitignored)
 ```
 
 ## Prerequisites
@@ -107,7 +169,17 @@ make fbtest     # screen test    | make audio  # audio tool
 make cammpp     # camera capture | make campreview  # live preview (raw colour)
 make camcc      # colour-corrected live preview
 make clean
+
+# CNN / NPU
+make nnacam        # live camera → ImageNet ResNet-18 label on the LCD (AWNN/CPU)
+make nnaprobe      # NPU bring-up probe (read-only)
+make nna-cifar10   # hand-built CNN on the NPU (GPLv3 v831-npu)
+make kbrun         # kbdk board runner (ncnn + AWNN + NVDLA engines)
+make nna-runner    # GPLv3 NVDLA job executor (kbrun spawns it for nvdla packs)
 ```
+
+The `kbdk` platform (Rust + Python) builds separately — see its quick-start at the
+top of this file: `cargo build`, `(cd py && uv sync)`, `sh board/ncnn/build.sh`.
 
 ## `uai` — the serial toolkit
 One native tool, usable interactively **and** scriptably (the `exec`/`run`/`push`
