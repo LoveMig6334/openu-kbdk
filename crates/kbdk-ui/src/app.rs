@@ -23,6 +23,12 @@ fn default_runtime() -> String {
 fn default_zoom() -> f32 {
     1.25
 }
+fn default_local_path() -> String {
+    ".".into()
+}
+fn default_board_path() -> String {
+    "/tmp".into()
+}
 
 /// Everything the user typed — persisted across sessions via eframe Storage.
 /// New fields need `#[serde(default…)]` so storage from older builds still loads.
@@ -48,6 +54,10 @@ pub struct Fields {
     pub res: String,
     pub capture_dir: String,
     pub capture_class: String,
+    #[serde(default = "default_local_path")]
+    pub last_local_path: String,
+    #[serde(default = "default_board_path")]
+    pub last_board_path: String,
 }
 
 impl Default for Fields {
@@ -67,6 +77,8 @@ impl Default for Fields {
             res: "320x240".into(),
             capture_dir: "datasets/mydata".into(),
             capture_class: "class_a".into(),
+            last_local_path: default_local_path(),
+            last_board_path: default_board_path(),
         }
     }
 }
@@ -135,6 +147,9 @@ pub struct KbdkApp {
     pub procs: Vec<kbdk_core::procs::Proc>,
     pub tasks_status: String,
     pub kill_confirm: Option<(u32, String)>, // (pid, cmd) awaiting confirm
+
+    // files tab
+    pub files: files_tab::FilesState,
 }
 
 /// Keep the perf-plot vectors bounded (~8 min of 2 s samples).
@@ -191,6 +206,8 @@ impl KbdkApp {
         };
         workers.start_device_poller();
 
+        let files = files_tab::FilesState::new(f.last_local_path.clone(), f.last_board_path.clone());
+
         let mut app = Self {
             f,
             rx,
@@ -235,6 +252,7 @@ impl KbdkApp {
             procs: vec![],
             tasks_status: String::new(),
             kill_confirm: None,
+            files,
         };
         app.rescan_packs();
 
@@ -291,6 +309,10 @@ impl KbdkApp {
 
     pub fn rescan_packs(&mut self) {
         self.packs = deploy_tab::scan_packs(&self.workers.repo_root.join(&self.f.packs_dir));
+    }
+
+    pub fn files_status_set(&mut self, s: String) {
+        self.files.status = s;
     }
 
     /// Save the latest board frame as a PNG into <capture_dir>/<capture_class>/
@@ -434,7 +456,12 @@ impl KbdkApp {
                     self.procs.retain(|p| p.pid != pid);
                 }
                 Msg::OpError { context, message } => {
-                    self.tasks_status = format!("{context}: {message}");
+                    let msg = format!("{context}: {message}");
+                    self.tasks_status = msg.clone();
+                    self.files_status_set(msg);
+                }
+                Msg::DirListed { path, entries } => {
+                    self.files.board.children.insert(path, entries);
                 }
             }
         }
@@ -504,6 +531,8 @@ impl eframe::App for KbdkApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         // keep Cmd+± zoom adjustments for the next launch
         self.f.ui_zoom = self.workers.ctx.zoom_factor();
+        self.f.last_local_path = self.files.local.root.clone();
+        self.f.last_board_path = self.files.board.root.clone();
         eframe::set_value(storage, eframe::APP_KEY, &self.f);
     }
 

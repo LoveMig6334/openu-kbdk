@@ -36,6 +36,7 @@ pub enum Msg {
     ProcList(Vec<kbdk_core::procs::Proc>),
     Killed { pid: u32 },
     OpError { context: String, message: String },
+    DirListed { path: String, entries: Vec<kbdk_core::fs::DirEntry> },
 }
 
 /// One exec per poll tick: last result lines + the KBSTAT health sample
@@ -248,6 +249,19 @@ impl Workers {
             match kbdk_core::procs::kill(&t, pid, sig) {
                 Ok(()) => { let _ = tx.send(Msg::Killed { pid }); }
                 Err(e) => { let _ = tx.send(Msg::OpError { context: format!("kill {pid}"), message: e.to_string() }); }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn list_dir(&self, path: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            match kbdk_core::fs::list_dir(&t, &path) {
+                Ok(entries) => { let _ = tx.send(Msg::DirListed { path, entries }); }
+                Err(e) => { let _ = tx.send(Msg::OpError { context: format!("ls {path}"), message: e.to_string() }); }
             }
             ctx.request_repaint();
         });
