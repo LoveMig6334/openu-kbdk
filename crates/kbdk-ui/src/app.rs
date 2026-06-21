@@ -1,7 +1,7 @@
 //! Top-level app: tab routing, device badge, channel pumping, persistence.
 
 use crate::workers::{Msg, Workers};
-use crate::{convert_tab, deploy_tab, files_tab, tasks_tab, theme, train_tab};
+use crate::{convert_tab, deploy_tab, files_tab, hardware_tab, tasks_tab, theme, train_tab};
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -12,6 +12,7 @@ pub enum Tab {
     Deploy,
     Files,
     Tasks,
+    Hardware,
 }
 
 fn default_task() -> String {
@@ -150,6 +151,15 @@ pub struct KbdkApp {
 
     // files tab
     pub files: files_tab::FilesState,
+
+    // hardware tab
+    pub hw_info: Option<kbdk_core::hwinfo::HwInfo>,
+    pub hw_probing: bool,
+    pub hw_status: String,
+    pub hw_live: Option<kbdk_core::hwinfo::LiveStats>,
+    pub hw_mem_hist: Vec<[f64; 2]>,
+    pub hw_last_live_poll: Option<std::time::Instant>,
+    pub hw_live_inflight: bool,
 }
 
 /// Keep the perf-plot vectors bounded (~8 min of 2 s samples).
@@ -253,6 +263,13 @@ impl KbdkApp {
             tasks_status: String::new(),
             kill_confirm: None,
             files,
+            hw_info: None,
+            hw_probing: false,
+            hw_status: String::new(),
+            hw_live: None,
+            hw_mem_hist: vec![],
+            hw_last_live_poll: None,
+            hw_live_inflight: false,
         };
         app.rescan_packs();
 
@@ -309,10 +326,6 @@ impl KbdkApp {
 
     pub fn rescan_packs(&mut self) {
         self.packs = deploy_tab::scan_packs(&self.workers.repo_root.join(&self.f.packs_dir));
-    }
-
-    pub fn files_status_set(&mut self, s: String) {
-        self.files.status = s;
     }
 
     /// Save the latest board frame as a PNG into <capture_dir>/<capture_class>/
@@ -455,10 +468,24 @@ impl KbdkApp {
                     self.tasks_status = format!("killed {pid}");
                     self.procs.retain(|p| p.pid != pid);
                 }
+                Msg::HwInfo(info) => {
+                    self.hw_info = Some(info);
+                    self.hw_probing = false;
+                    self.hw_status = "updated".into();
+                }
+                Msg::HwLive(s) => {
+                    let t = self.started.elapsed().as_secs_f64();
+                    push_capped(&mut self.hw_mem_hist, [t, s.mem_avail_kb as f64]);
+                    self.hw_live = Some(s);
+                    self.hw_live_inflight = false;
+                }
                 Msg::OpError { context, message } => {
                     let msg = format!("{context}: {message}");
                     self.tasks_status = msg.clone();
-                    self.files_status_set(msg);
+                    self.files.status = msg.clone();
+                    self.hw_status = msg;
+                    self.hw_probing = false;
+                    self.hw_live_inflight = false;
                 }
                 Msg::DirListed { path, entries } => {
                     self.files.board.children.insert(path, entries);
@@ -520,6 +547,7 @@ impl KbdkApp {
             ui.selectable_value(&mut self.f.tab, Tab::Deploy, "Deploy & Run");
             ui.selectable_value(&mut self.f.tab, Tab::Files, "Files");
             ui.selectable_value(&mut self.f.tab, Tab::Tasks, "Tasks");
+            ui.selectable_value(&mut self.f.tab, Tab::Hardware, "Hardware");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.adb_devices.is_empty() && self.serial_ports.is_empty() {
@@ -562,6 +590,7 @@ impl eframe::App for KbdkApp {
                 Tab::Deploy => deploy_tab::show(self, ui),
                 Tab::Files => files_tab::show(self, ui),
                 Tab::Tasks => tasks_tab::show(self, ui),
+                Tab::Hardware => hardware_tab::show(self, ui),
             });
     }
 }

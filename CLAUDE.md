@@ -123,6 +123,13 @@ bounded `head -c`+pull); Tasks lists board processes from `/proc` (RSS-sorted)
 with SIGTERM/SIGKILL. Both run all board I/O on worker threads and refresh
 manually (no background poll — the single A7 competes with kbrun). Helpers live
 in `kbdk-core::{fs,procs}` with hardware-free parser unit tests.
+The **Hardware** tab is a read-only board inventory: a curated static probe
+(SoC/memory/kernel/display/camera+i2c/storage/spi/audio/network/NPU, one batched
+`Transport::exec` parsed by `kbdk-core::hwinfo`) shown as collapsing sections, plus
+a live monitor (CPU load / free RAM / temperature / uptime + free-RAM sparkline)
+that auto-polls every ~2 s **only while the tab is visible** (driven from `show()`
+via `request_repaint_after`; egui runs only the active tab). Static probe is fetched
+on first open + manual refresh. Parsers are hardware-free unit-tested.
 
 Hard-won facts baked into kbdk (don't re-learn these):
 - **AWNN can't run vanilla ncnn**: `libmaix_nn.so` loads a vanilla .param/.bin without

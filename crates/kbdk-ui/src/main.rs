@@ -4,6 +4,7 @@ mod app;
 mod convert_tab;
 mod deploy_tab;
 mod files_tab;
+mod hardware_tab;
 mod tasks_tab;
 mod theme;
 mod train_tab;
