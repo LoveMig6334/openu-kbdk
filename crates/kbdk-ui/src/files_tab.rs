@@ -33,6 +33,12 @@ impl FileTree {
     }
 }
 
+/// Build a local-only file tree rooted at `root` (the Edit tab reuses the
+/// `FileTree` type but keeps `FileTree::new` private to this module).
+pub fn local_tree(root: String) -> FileTree {
+    FileTree::new(root)
+}
+
 pub struct FilesState {
     pub local: FileTree,
     pub board: FileTree,

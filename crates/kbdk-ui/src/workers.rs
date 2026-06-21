@@ -7,6 +7,7 @@ use kbdk_core::frames;
 use kbdk_core::pipeline::{self, PyEvent};
 use kbdk_core::transport::Transport;
 use kbdk_core::{deploy, discover};
+use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -42,6 +43,18 @@ pub enum Msg {
     PreviewLoaded { path: String, body: String, is_binary: bool },
     HwInfo(kbdk_core::hwinfo::HwInfo),
     HwLive(kbdk_core::hwinfo::LiveStats),
+
+    // --- Edit tab (build / deploy+run) ---
+    /// One streamed line of compiler output.
+    EditBuildOutput(String),
+    /// Compile finished: Ok(output binary path) or Err(message).
+    EditBuildDone(Result<PathBuf, String>),
+    /// One streamed line of the running board program's stdout.
+    EditRunOutput(String),
+    /// The board program exited (or push/chmod/spawn failed): Ok(()) or Err.
+    EditRunDone(Result<(), String>),
+    /// Stop requested + the host adb child was killed.
+    EditRunStopped,
 }
 
 /// One exec per poll tick: last result lines + the KBSTAT health sample
@@ -116,6 +129,13 @@ pub struct Workers {
     pub ctx: eframe::egui::Context,
     /// pid of the running uv child (train or convert), for Stop
     pub py_pid: Arc<std::sync::Mutex<Option<u32>>>,
+    /// pid of the running Edit-tab board program (the host `adb shell` child),
+    /// for Stop — killing it closes the session so adbd reaps the board group.
+    pub run_pid: Arc<std::sync::Mutex<Option<u32>>>,
+    /// set by `stop_run`: tells the `deploy_run` worker to abort before launching
+    /// (Stop pressed during the push/chmod window) and to stay silent on exit so
+    /// the panel shows only "(stopped)", not a spurious "(program exited)".
+    pub run_cancel: Arc<AtomicBool>,
     /// log-poller liveness flag
     pub polling: Arc<AtomicBool>,
 }
@@ -176,6 +196,120 @@ impl Workers {
         if let Some(pid) = *self.py_pid.lock().unwrap() {
             let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
         }
+    }
+
+    /// Edit tab: cross-compile `src` to `out_dir` on the host, streaming compiler
+    /// output line-by-line, then report the built binary path (or the error).
+    pub fn build(&self, src: PathBuf, out_dir: PathBuf, extra_args: Vec<String>) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        let root = self.repo_root.clone();
+        std::thread::spawn(move || {
+            let r = kbdk_core::build::compile(&root, &src, &out_dir, &extra_args, &mut |line| {
+                let _ = tx.send(Msg::EditBuildOutput(line));
+                ctx.request_repaint();
+            });
+            let _ = tx.send(Msg::EditBuildDone(r.map_err(|e| e.to_string())));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Edit tab: md5-verified push of `bin` to `remote`, chmod +x, then spawn it
+    /// on the board over a long-lived `adb shell` whose stdout is streamed. The
+    /// host child's pid is recorded in `run_pid` so `stop_run` can kill it.
+    pub fn deploy_run(&self, bin: PathBuf, remote: String, env_prefix: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        let run_pid = self.run_pid.clone();
+        let run_cancel = self.run_cancel.clone();
+        // Reset on the UI thread before spawning, so a later Stop (in a subsequent
+        // frame) can only ever set this true and never races this reset.
+        run_cancel.store(false, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            if let Err(e) = t.push(&bin, &remote) {
+                let _ = tx.send(Msg::EditRunDone(Err(format!("push {remote}: {e}"))));
+                ctx.request_repaint();
+                return;
+            }
+            match t.exec(&format!("chmod +x {remote}"), 15) {
+                Ok(r) if r.rc != 0 => {
+                    let _ = tx.send(Msg::EditRunDone(Err(format!(
+                        "chmod +x {remote} failed (rc={}): {}",
+                        r.rc,
+                        r.output.trim()
+                    ))));
+                    ctx.request_repaint();
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::EditRunDone(Err(format!("chmod +x {remote}: {e}"))));
+                    ctx.request_repaint();
+                    return;
+                }
+                Ok(_) => {}
+            }
+            // Stop pressed during the push/chmod window: abort before launching.
+            // `stop_run` already emitted EditRunStopped, so stay silent here.
+            if run_cancel.load(Ordering::SeqCst) {
+                ctx.request_repaint();
+                return;
+            }
+            let mut child = match kbdk_core::build::spawn_board_run(None, &remote, &env_prefix) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Msg::EditRunDone(Err(e.to_string())));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            *run_pid.lock().unwrap() = Some(child.id());
+            if let Some(stdout) = child.stdout.take() {
+                for line in std::io::BufReader::new(stdout).lines() {
+                    match line {
+                        Ok(l) => {
+                            let _ = tx.send(Msg::EditRunOutput(l));
+                            ctx.request_repaint();
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            let _ = child.wait();
+            *run_pid.lock().unwrap() = None;
+            // Suppress the natural-exit message if the program was stopped, so the
+            // panel shows only "(stopped)" (sent by stop_run), not both lines.
+            if !run_cancel.load(Ordering::SeqCst) {
+                let _ = tx.send(Msg::EditRunDone(Ok(())));
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Edit tab: stop the running board program. Kills the host `adb shell` child
+    /// (closing the session → adbd reaps the board process group, since the board
+    /// has no setsid/nohup) and best-effort `kill $(pidof <name>)` for insurance.
+    pub fn stop_run(&self, remote_name: String) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        let run_pid = self.run_pid.clone();
+        // Signal the deploy_run worker to abort (Stop during push/chmod) and to
+        // suppress its natural-exit message.
+        self.run_cancel.store(true, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            if let Some(pid) = *run_pid.lock().unwrap() {
+                let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+            }
+            if !remote_name.trim().is_empty() {
+                let t = AdbTransport::new(None);
+                let _ = t.exec(
+                    &format!("kill $(pidof {remote_name}) 2>/dev/null; true"),
+                    15,
+                );
+            }
+            let _ = tx.send(Msg::EditRunStopped);
+            ctx.request_repaint();
+        });
     }
 
     pub fn deploy(&self, pack_dir: PathBuf) {

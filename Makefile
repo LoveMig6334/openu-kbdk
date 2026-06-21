@@ -3,6 +3,7 @@
 #   make            build bin/uai (host) and bin/hello (board)
 #   make uai        build just the host serial tool
 #   make hello      cross-compile the board test program
+#   make ledblink   cross-compile the GPIO LED blinker (deploy-ledblink to push)
 #   make deploy     build hello and push+run it on the board via uai
 #   make monitor    open a read-only serial console
 #   make clean
@@ -25,8 +26,8 @@ MPPDEF  := -DAWCHIP=0x1817
 
 UAI := ./bin/uai
 
-.PHONY: all uai hello fbtest audio v4l2cap v4l2probe camdiag camread cammpp campreview camcc nncls clean \
-        deploy deploy-fb deploy-audio deploy-cammpp deploy-preview preview-start preview-stop \
+.PHONY: all uai hello fbtest audio ledblink v4l2cap v4l2probe camdiag camread cammpp campreview camcc nncls clean \
+        deploy deploy-fb deploy-audio deploy-ledblink deploy-cammpp deploy-preview preview-start preview-stop \
         deploy-camcc camcc-start camcc-stop deploy-nncls nnload nnaprobe deploy-nnaprobe \
         nna-cifar10 deploy-nna-cifar10 nnacam deploy-nnacam monitor term
 all: uai hello fbtest audio
@@ -50,6 +51,12 @@ bin/v4l2cap: src/v4l2cap.c | bin
 audio: bin/audio
 bin/audio: src/audio.c | bin
 	$(CROSS) $(CROSSFLAGS) -o $@ $< -lm
+
+# GPIO LED blink via the raw /dev/gpiochip chardev ioctl (no vendor lib, no -lm).
+# Pin defaults are SAFE PLACEHOLDERS — see docs/research/2026-06-21-led-gpio-investigation.md.
+ledblink: bin/ledblink
+bin/ledblink: src/ledblink.c | bin
+	$(CROSS) $(CROSSFLAGS) -o $@ $<
 
 # Camera diagnostics (V4L2 recon — proved standard streaming is unavailable here)
 v4l2probe: bin/v4l2probe
@@ -157,6 +164,10 @@ deploy-fb: fbtest
 deploy-audio: audio
 	$(UAI) push bin/audio /tmp/audio && $(UAI) exec "chmod +x /tmp/audio"
 
+deploy-ledblink: ledblink
+	$(UAI) push bin/ledblink /tmp/ledblink && $(UAI) exec "chmod +x /tmp/ledblink"
+	@echo 'run: ./bin/uai exec "/tmp/ledblink /dev/gpiochip1 <line> 500 6"'
+
 deploy-cammpp: cammpp
 	$(UAI) push bin/cammpp /tmp/cammpp && $(UAI) exec "chmod +x /tmp/cammpp"
 	@echo 'run: ./bin/uai exec "LD_LIBRARY_PATH=/usr/lib/eyesee-mpp:/usr/lib /tmp/cammpp 320x240"'
@@ -199,6 +210,6 @@ term: uai
 	$(UAI) term
 
 clean:
-	rm -f bin/uai bin/hello bin/fbtest bin/audio \
+	rm -f bin/uai bin/hello bin/fbtest bin/audio bin/ledblink \
 	      bin/v4l2cap bin/v4l2probe bin/camdiag bin/camread bin/cammpp bin/campreview \
 	      bin/camcc bin/nncls bin/nnaprobe bin/nna_cifar10 bin/nnacam

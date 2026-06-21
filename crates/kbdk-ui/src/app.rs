@@ -1,7 +1,10 @@
 //! Top-level app: tab routing, device badge, channel pumping, persistence.
 
 use crate::workers::{Msg, Workers};
-use crate::{convert_tab, deploy_tab, files_tab, hardware_tab, tasks_tab, theme, train_tab};
+use crate::{
+    convert_tab, deploy_tab, edit_tab, examples_tab, files_tab, hardware_tab, tasks_tab, theme,
+    train_tab,
+};
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -11,8 +14,10 @@ pub enum Tab {
     Convert,
     Deploy,
     Files,
+    Edit,
     Tasks,
     Hardware,
+    Examples,
 }
 
 fn default_task() -> String {
@@ -59,6 +64,15 @@ pub struct Fields {
     pub last_local_path: String,
     #[serde(default = "default_board_path")]
     pub last_board_path: String,
+    /// Edit tab: prepend the MPP/eyesee LD_LIBRARY_PATH when running the program.
+    #[serde(default)]
+    pub edit_mpp_libs: bool,
+    /// Edit tab: extra linker/compiler flags appended after the source.
+    #[serde(default)]
+    pub edit_extra_args: String,
+    /// Edit tab: last opened file (convenience + screenshot seeding).
+    #[serde(default)]
+    pub edit_open_path: String,
 }
 
 impl Default for Fields {
@@ -80,6 +94,49 @@ impl Default for Fields {
             capture_class: "class_a".into(),
             last_local_path: default_local_path(),
             last_board_path: default_board_path(),
+            edit_mpp_libs: false,
+            edit_extra_args: String::new(),
+            edit_open_path: String::new(),
+        }
+    }
+}
+
+/// Edit-tab state (local source tree + editor buffer + build/run log). Everything
+/// non-persisted lives here; `edit_mpp_libs`/`edit_extra_args`/`edit_open_path` are
+/// on `Fields` so they survive restarts.
+pub struct EditState {
+    /// Local-only file tree rooted at the repo root (reuses the Files tab type).
+    pub tree: files_tab::FileTree,
+    pub open_path: Option<std::path::PathBuf>,
+    pub buffer: String,
+    /// Snapshot at last open/save; `buffer != saved_snapshot` ⇒ dirty.
+    pub saved_snapshot: String,
+    /// Combined compile + run log (bounded in `pump`).
+    pub output: Vec<String>,
+    pub building: bool,
+    pub running: bool,
+    /// Set by EditBuildDone(Ok); gates Deploy + Run on a clean build.
+    pub last_bin: Option<std::path::PathBuf>,
+    /// Buffer contents `last_bin` was compiled from. Deploy + Run is gated on this
+    /// still matching the editor buffer, so editing the code or switching files
+    /// invalidates the built binary and prevents running stale code on the board.
+    pub built_from: Option<String>,
+    pub status: String,
+}
+
+impl EditState {
+    pub fn new(root: String) -> Self {
+        Self {
+            tree: files_tab::local_tree(root),
+            open_path: None,
+            buffer: String::new(),
+            saved_snapshot: String::new(),
+            output: vec![],
+            building: false,
+            running: false,
+            last_bin: None,
+            built_from: None,
+            status: String::new(),
         }
     }
 }
@@ -152,6 +209,9 @@ pub struct KbdkApp {
     // files tab
     pub files: files_tab::FilesState,
 
+    // edit tab
+    pub edit: EditState,
+
     // hardware tab
     pub hw_info: Option<kbdk_core::hwinfo::HwInfo>,
     pub hw_probing: bool,
@@ -160,6 +220,13 @@ pub struct KbdkApp {
     pub hw_mem_hist: Vec<[f64; 2]>,
     pub hw_last_live_poll: Option<std::time::Instant>,
     pub hw_live_inflight: bool,
+
+    // examples tab (cached local scan of examples/board)
+    pub examples: Vec<examples_tab::Example>,
+    pub examples_status: String,
+    /// false until the first scan; reset by Refresh. Prevents re-scanning the
+    /// filesystem every frame when the scan yields zero templates.
+    pub examples_scanned: bool,
 }
 
 /// Keep the perf-plot vectors bounded (~8 min of 2 s samples).
@@ -167,6 +234,14 @@ fn push_capped(v: &mut Vec<[f64; 2]>, p: [f64; 2]) {
     v.push(p);
     if v.len() > 240 {
         v.remove(0);
+    }
+}
+
+/// Keep the Edit-tab build/run log bounded (long-running camera programs stream
+/// forever): drop the oldest 500 lines once it grows past 2000.
+fn cap_log(v: &mut Vec<String>) {
+    if v.len() > 2000 {
+        v.drain(0..500);
     }
 }
 
@@ -186,6 +261,9 @@ fn apply_field_overrides(f: &mut Fields) {
             "size" => f.size = v.parse().unwrap_or(f.size),
             "model_out" => f.model_out = v.into(),
             "pack_name" => f.pack_name = v.into(),
+            "edit_open_path" => f.edit_open_path = v.into(),
+            "edit_extra_args" => f.edit_extra_args = v.into(),
+            "edit_mpp_libs" => f.edit_mpp_libs = v == "1" || v == "true",
             _ => eprintln!("KBDK_FIELDS: unknown key {k}"),
         }
     }
@@ -207,16 +285,20 @@ impl KbdkApp {
         cc.egui_ctx.set_zoom_factor(f.ui_zoom.clamp(0.5, 3.0));
 
         let (tx, rx) = channel();
+        let repo_root = std::env::current_dir().expect("cwd");
         let workers = Workers {
             tx,
-            repo_root: std::env::current_dir().expect("cwd"),
+            repo_root: repo_root.clone(),
             ctx: cc.egui_ctx.clone(),
             py_pid: Default::default(),
+            run_pid: Default::default(),
+            run_cancel: Default::default(),
             polling: Default::default(),
         };
         workers.start_device_poller();
 
         let files = files_tab::FilesState::new(f.last_local_path.clone(), f.last_board_path.clone());
+        let edit = EditState::new(repo_root.to_string_lossy().into_owned());
 
         let mut app = Self {
             f,
@@ -263,6 +345,7 @@ impl KbdkApp {
             tasks_status: String::new(),
             kill_confirm: None,
             files,
+            edit,
             hw_info: None,
             hw_probing: false,
             hw_status: String::new(),
@@ -270,6 +353,9 @@ impl KbdkApp {
             hw_mem_hist: vec![],
             hw_last_live_poll: None,
             hw_live_inflight: false,
+            examples: vec![],
+            examples_status: String::new(),
+            examples_scanned: false,
         };
         app.rescan_packs();
 
@@ -279,6 +365,11 @@ impl KbdkApp {
             app.f.tab = match tab.as_str() {
                 "convert" => Tab::Convert,
                 "deploy" => Tab::Deploy,
+                "files" => Tab::Files,
+                "edit" => Tab::Edit,
+                "tasks" => Tab::Tasks,
+                "hardware" => Tab::Hardware,
+                "examples" => Tab::Examples,
                 _ => Tab::Train,
             };
         }
@@ -320,6 +411,21 @@ impl KbdkApp {
             }
             let m = convert_tab::default_model(&app);
             convert_tab::start(&mut app, m);
+        }
+        // Seed the Edit tab's open file (for --tab edit screenshots / convenience).
+        if !app.f.edit_open_path.is_empty() {
+            let p = std::path::Path::new(&app.f.edit_open_path);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                app.workers.repo_root.join(p)
+            };
+            if let Ok(text) = std::fs::read_to_string(&abs) {
+                app.edit.buffer = text;
+                app.edit.saved_snapshot = app.edit.buffer.clone();
+                app.edit.open_path = Some(abs.clone());
+                app.edit.status = format!("opened {}", abs.display());
+            }
         }
         app
     }
@@ -500,6 +606,46 @@ impl KbdkApp {
                 Msg::PreviewLoaded { path, body, is_binary } => {
                     self.files.preview = Some((path, body, is_binary));
                 }
+                Msg::EditBuildOutput(s) => {
+                    self.edit.output.push(s);
+                    cap_log(&mut self.edit.output);
+                }
+                Msg::EditBuildDone(r) => {
+                    self.edit.building = false;
+                    match r {
+                        Ok(bin) => {
+                            self.edit.status = format!("build ok: {}", bin.display());
+                            self.edit.output.push(format!("build ok: {}", bin.display()));
+                            self.edit.last_bin = Some(bin);
+                        }
+                        Err(e) => {
+                            self.edit.status = format!("build failed: {e}");
+                            self.edit.output.push(format!("build failed: {e}"));
+                            self.edit.last_bin = None;
+                        }
+                    }
+                    cap_log(&mut self.edit.output);
+                }
+                Msg::EditRunOutput(s) => {
+                    self.edit.output.push(s);
+                    cap_log(&mut self.edit.output);
+                }
+                Msg::EditRunDone(r) => {
+                    self.edit.running = false;
+                    match r {
+                        Ok(()) => self.edit.output.push("(program exited)".into()),
+                        Err(e) => {
+                            self.edit.status = format!("run error: {e}");
+                            self.edit.output.push(format!("run error: {e}"));
+                        }
+                    }
+                    cap_log(&mut self.edit.output);
+                }
+                Msg::EditRunStopped => {
+                    self.edit.running = false;
+                    self.edit.output.push("(stopped)".into());
+                    cap_log(&mut self.edit.output);
+                }
             }
         }
     }
@@ -542,12 +688,52 @@ impl KbdkApp {
             ui.heading(egui::RichText::new("kbdk").color(theme::MAUVE).strong());
             ui.label(egui::RichText::new("KidBright µAI dev-kit").color(theme::SUBTEXT));
             ui.separator();
-            ui.selectable_value(&mut self.f.tab, Tab::Train, "Train");
-            ui.selectable_value(&mut self.f.tab, Tab::Convert, "Convert");
-            ui.selectable_value(&mut self.f.tab, Tab::Deploy, "Deploy & Run");
+
+            // ML pipeline (Train / Convert / Deploy & Run) collapsed under a
+            // dropdown; the button reflects which ML tab is active.
+            let ml_active = matches!(self.f.tab, Tab::Train | Tab::Convert | Tab::Deploy);
+            let ml_label = if ml_active {
+                let name = match self.f.tab {
+                    Tab::Convert => "Convert",
+                    Tab::Deploy => "Deploy & Run",
+                    _ => "Train",
+                };
+                format!("ML  ·  {name}  ▾")
+            } else {
+                "ML  ▾".to_string()
+            };
+            let ml_text = if ml_active {
+                egui::RichText::new(ml_label).color(theme::MAUVE).strong()
+            } else {
+                egui::RichText::new(ml_label)
+            };
+            ui.menu_button(ml_text, |ui| {
+                if ui
+                    .selectable_value(&mut self.f.tab, Tab::Train, "Train")
+                    .clicked()
+                {
+                    ui.close();
+                }
+                if ui
+                    .selectable_value(&mut self.f.tab, Tab::Convert, "Convert")
+                    .clicked()
+                {
+                    ui.close();
+                }
+                if ui
+                    .selectable_value(&mut self.f.tab, Tab::Deploy, "Deploy & Run")
+                    .clicked()
+                {
+                    ui.close();
+                }
+            });
+
+            // Board / dev tabs as direct top-level entries.
             ui.selectable_value(&mut self.f.tab, Tab::Files, "Files");
             ui.selectable_value(&mut self.f.tab, Tab::Tasks, "Tasks");
             ui.selectable_value(&mut self.f.tab, Tab::Hardware, "Hardware");
+            ui.selectable_value(&mut self.f.tab, Tab::Edit, "Edit");
+            ui.selectable_value(&mut self.f.tab, Tab::Examples, "Examples");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.adb_devices.is_empty() && self.serial_ports.is_empty() {
@@ -571,6 +757,12 @@ impl eframe::App for KbdkApp {
         self.f.ui_zoom = self.workers.ctx.zoom_factor();
         self.f.last_local_path = self.files.local.root.clone();
         self.f.last_board_path = self.files.board.root.clone();
+        self.f.edit_open_path = self
+            .edit
+            .open_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         eframe::set_value(storage, eframe::APP_KEY, &self.f);
     }
 
@@ -589,8 +781,10 @@ impl eframe::App for KbdkApp {
                 Tab::Convert => convert_tab::show(self, ui),
                 Tab::Deploy => deploy_tab::show(self, ui),
                 Tab::Files => files_tab::show(self, ui),
+                Tab::Edit => edit_tab::show(self, ui),
                 Tab::Tasks => tasks_tab::show(self, ui),
                 Tab::Hardware => hardware_tab::show(self, ui),
+                Tab::Examples => examples_tab::show(self, ui),
             });
     }
 }
