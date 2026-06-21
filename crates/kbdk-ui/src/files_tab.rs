@@ -193,23 +193,58 @@ fn board_node(ui: &mut egui::Ui, app: &mut KbdkApp, path: &str) {
 
 /// One row: a clickable disclosure for dirs, a selectable label for files.
 fn row(ui: &mut egui::Ui, app: &mut KbdkApp, is_local: bool, full: &str, e: &DirEntry) {
-    let tree = if is_local { &mut app.files.local } else { &mut app.files.board };
     if e.is_dir {
-        let open = tree.expanded.contains(full);
+        let open = if is_local {
+            app.files.local.expanded.contains(full)
+        } else {
+            app.files.board.expanded.contains(full)
+        };
         let arrow = if open { "▾" } else { "▸" };
-        if ui.selectable_label(false, format!("{arrow} 📁 {}", e.name)).clicked() {
+        let resp = ui.selectable_label(false, format!("{arrow} 📁 {}", e.name));
+        if resp.clicked() {
             if open {
-                tree.expanded.remove(full);
+                if is_local {
+                    app.files.local.expanded.remove(full);
+                } else {
+                    app.files.board.expanded.remove(full);
+                }
+            } else if is_local {
+                app.files.local.expanded.insert(full.to_string());
             } else {
-                tree.expanded.insert(full.to_string());
+                app.files.board.expanded.insert(full.to_string());
                 // board dirs need a fetch the first time
-                if !is_local && !app.files.board.children.contains_key(full) {
+                if !app.files.board.children.contains_key(full) {
                     app.files.board.children.insert(full.to_string(), vec![]);
                     app.workers.list_dir(full.to_string());
                 }
             }
         }
-        // recurse if expanded (re-borrow because the closure above took &mut)
+        // board dirs get rm -rf / chmod via right-click (gated behind the confirm dialog)
+        if !is_local {
+            let parent = full
+                .rsplit_once('/')
+                .map(|(d, _)| if d.is_empty() { "/".to_string() } else { d.to_string() })
+                .unwrap_or_else(|| "/".to_string());
+            resp.context_menu(|ui| {
+                if ui.button("chmod…").clicked() {
+                    app.files.dialog = Some(FsDialog::Chmod {
+                        path: full.to_string(),
+                        parent: parent.clone(),
+                        mode: "755".into(),
+                    });
+                    ui.close();
+                }
+                if ui.button("rm -rf").clicked() {
+                    app.files.dialog = Some(FsDialog::ConfirmRm {
+                        path: full.to_string(),
+                        is_dir: true,
+                        parent: parent.clone(),
+                    });
+                    ui.close();
+                }
+            });
+        }
+        // recurse if expanded
         let open_now = if is_local {
             app.files.local.expanded.contains(full)
         } else {
