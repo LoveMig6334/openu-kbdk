@@ -151,6 +151,11 @@ pub struct KbdkApp {
 
     // files tab
     pub files: files_tab::FilesState,
+
+    // hardware tab
+    pub hw_info: Option<kbdk_core::hwinfo::HwInfo>,
+    pub hw_probing: bool,
+    pub hw_status: String,
 }
 
 /// Keep the perf-plot vectors bounded (~8 min of 2 s samples).
@@ -254,6 +259,9 @@ impl KbdkApp {
             tasks_status: String::new(),
             kill_confirm: None,
             files,
+            hw_info: None,
+            hw_probing: false,
+            hw_status: String::new(),
         };
         app.rescan_packs();
 
@@ -310,10 +318,6 @@ impl KbdkApp {
 
     pub fn rescan_packs(&mut self) {
         self.packs = deploy_tab::scan_packs(&self.workers.repo_root.join(&self.f.packs_dir));
-    }
-
-    pub fn files_status_set(&mut self, s: String) {
-        self.files.status = s;
     }
 
     /// Save the latest board frame as a PNG into <capture_dir>/<capture_class>/
@@ -456,10 +460,17 @@ impl KbdkApp {
                     self.tasks_status = format!("killed {pid}");
                     self.procs.retain(|p| p.pid != pid);
                 }
+                Msg::HwInfo(info) => {
+                    self.hw_info = Some(info);
+                    self.hw_probing = false;
+                    self.hw_status = "updated".into();
+                }
                 Msg::OpError { context, message } => {
                     let msg = format!("{context}: {message}");
                     self.tasks_status = msg.clone();
-                    self.files_status_set(msg);
+                    self.files.status = msg.clone();
+                    self.hw_status = msg;
+                    self.hw_probing = false;
                 }
                 Msg::DirListed { path, entries } => {
                     self.files.board.children.insert(path, entries);

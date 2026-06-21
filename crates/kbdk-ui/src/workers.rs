@@ -40,6 +40,7 @@ pub enum Msg {
     /// A file op finished; if `refresh_board` is set, re-list that board dir.
     FileOpDone { context: String, refresh_board: Option<String> },
     PreviewLoaded { path: String, body: String, is_binary: bool },
+    HwInfo(kbdk_core::hwinfo::HwInfo),
 }
 
 /// One exec per poll tick: last result lines + the KBSTAT health sample
@@ -229,6 +230,19 @@ impl Workers {
     /// Test hook: start only the log poller (board runner already started externally).
     pub fn run_pack_poll_only(&self) {
         self.start_log_poller();
+    }
+
+    pub fn probe_hw(&self) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            match kbdk_core::hwinfo::probe_hwinfo(&t) {
+                Ok(info) => { let _ = tx.send(Msg::HwInfo(info)); }
+                Err(e) => { let _ = tx.send(Msg::OpError { context: "hardware probe".into(), message: e.to_string() }); }
+            }
+            ctx.request_repaint();
+        });
     }
 
     pub fn list_procs(&self) {
