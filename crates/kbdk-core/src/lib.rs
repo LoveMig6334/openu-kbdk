@@ -3,6 +3,7 @@ pub mod serial;
 pub mod deploy;
 pub mod discover;
 pub mod fs;
+pub mod hwinfo;
 pub mod procs;
 pub mod frames;
 pub mod pipeline;
