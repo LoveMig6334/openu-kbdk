@@ -263,7 +263,8 @@ Capability status against the goal (all "raw ioctl/mmap, no vendor lib" except w
 | --- | --- | --- |
 | **Screen** (framebuffer) | ✅ done | `fbtest.c` — `FBIOGET_*` + mmap. Self-contained. |
 | **Camera** | ✅ live preview on panel (raw + colour-corrected) | Standard V4L2 is unavailable here (`QBUF`/`DQBUF`/`QUERYBUF` ENOTTY — see `camdiag.c`); capture goes through Allwinner **MPP**. `cammpp.c` pulls NV21M frames (Y+VU phys/virt addrs, for processing); `campreview.c` shows the live camera on the 240×240 LCD via `AW_MPI_SYS_Bind(VI→VO)` (zero-copy hardware path); `camcc.c` is the colour-corrected CPU-path preview (MPP capture → per-pixel white-balance/saturation → `/dev/fb0`). All dlopen the board's `.so`; headers vendored under `vendor/eyesee-mpp/`. Raw colour is ISP-3A-limited (green/flat: near-white pixels converge to **U≈119 / V≈139** vs neutral 128, saturation ≈16); the proper fix is baked in `libisp.so`, but `camcc` neutralises it in software (U+9 / V−11, sat×1.6 — see the `camcc.c` note below). |
-| **GPIO / I²C / SPI / buttons** | ✅ ready | UAPI headers present; same raw-ioctl approach. Not yet written. |
+| **GPIO** (chardev) | ✅ first program (`ledblink.c`); board LED pin unconfirmed | Raw `/dev/gpiochipN` `GPIO_V2_*` ioctl with an automatic v1 `GPIO_GET_LINEHANDLE` fallback (the 4.9 kernel predates the GPIO_V2 uABI, which landed in 5.10). Chips: `/dev/gpiochip1` = main PIO (PA–PI, base 0), `/dev/gpiochip0` = R_PIO/PL bank (base 352). **No discrete GPIO LED in the running M2Dock device tree** (no `gpio-leds` node, empty `/sys/class/leds`, every output pin is a known non-LED function — camera reset/pwdn, wlan, LCD); `ledblink.c` ships safe placeholder defaults (`gpiochip1` line 0) + a `[chip] [line]` argv sweep for the on-hardware test. See `docs/research/2026-06-21-led-gpio-investigation.md`. |
+| **I²C / SPI** | ✅ ready | UAPI headers present (`linux/i2c-dev.h`, `linux/spi/spidev.h`); same raw-ioctl approach. Not yet written. (Board buttons are **analog** via `sunxi-gpadc0`/`event0`, not GPIO.) |
 | **Audio** | ✅ working | `audio.c` — raw `SNDRV_PCM_IOCTL_*` on `/dev/snd/pcmC0D0{p,c}`, no alsa-lib. `probe`/`tone`/`play`/`rec`, all verified on hardware. Codec: playback 1–2 ch, capture mono-only, S16_LE/S24_LE, 8k–192k Hz. |
 | **NPU** (the "µAI") | ✅ CNN inference runs **on the NPU** from userspace (no kernel driver) | The V831 NPU is a customised **NVIDIA NVDLA `nv_small`** core. **Two working paths.** (1) *CPU/AWNN*: the board ships `libmaix_nn.so` (AWNN, a quantized-**ncnn** fork; `.param`+`.bin`, `7767517` magic); `nncls.c` dlopen's it and runs `fe_res18` (~31 ms/inf) — but it `open(/dev/nna)`-fails and falls back to **CPU** because this rootfs's kernel was built **without `CONFIG_SUNXI_NNA`** (no `nna_sunxi.ko`; DT node `nna@02400000` *is* present + `okay`). (2) *NPU/userspace*: drive the NVDLA core directly via `/dev/mem` (regs `0x2400000`, CCU `0x3001000`) + `/dev/ion` + `/dev/cedar_dev` — **no kernel module needed**. `make nnaprobe` proves the regs respond; `make nna-cifar10` runs a 4-conv CNN on the NPU (classifies the test image "ship : 127", verified). Built from vendored **GPLv3** `third_party/v831-npu/` (mtx512). See `docs/superpowers/specs/2026-06-08-npu-cnn-runtime-design.md`. **kbdk now compiles trained models to the NPU** (`runtime: "nvdla"` packs — see the NVDLA runtime note in the kbdk facts list): npu_slim @64² = 1.9 ms/inf, byte-exact vs the host int8 simulation. |
 
@@ -345,6 +346,18 @@ facts learned by trial:
   (read back via `->min`). `pcm_setup` retries with the other channel count when the
   codec refuses one (capture is mono-only). Opened blocking, so `WRITEI`/`READI` pace
   themselves; `EPIPE` (xrun) is handled by re-`PREPARE`. Build needs `-lm` (sine gen).
+- `ledblink.c` — **GPIO LED blink** via the raw `/dev/gpiochipN` chardev ioctl (the
+  first GPIO program; `linux/gpio.h` UAPI). Requests the line as output with the modern
+  `GPIO_V2_GET_LINE_IOCTL` and **auto-falls back to the v1 `GPIO_GET_LINEHANDLE_IOCTL`**
+  on `ENOTTY`/`EINVAL` — the board's 4.9 kernel predates the GPIO_V2 uABI (5.10).
+  `nanosleep` is bound through an `aw_nanosleep` `__asm__` alias to dodge the
+  musl-1.2→1.1.16 time64 trap (same idiom as `aw_dlsym`); SIGINT/SIGTERM release the
+  line and close. `#define LED_CHIP`/`LED_LINE` are **safe placeholders**
+  (`/dev/gpiochip1` line 0) marked `/* HW-CONFIRM */`, and
+  `ledblink [chip] [line] [period_ms] [count]` sweeps candidates — the running device
+  tree declares **no discrete GPIO LED**, so confirm the pin on hardware (per the GPIO
+  capability row + `docs/research/2026-06-21-led-gpio-investigation.md`) and never
+  default to the camera reset/power-down lines. `make ledblink` / `make deploy-ledblink`.
 - `v4l2probe.c` / `v4l2cap.c` — the camera is an OV2685 behind the Allwinner sunxi-vin
   pipeline on `/dev/video0` (a **multi-planar** node; `capabilities=0x85201000` =
   STREAMING|READWRITE|MPLANE, though per-node `device_caps` under-reports to `0x00200000`).

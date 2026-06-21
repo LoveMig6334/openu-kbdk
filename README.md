@@ -48,7 +48,13 @@ dataset, train, deploy, all without leaving the app. The **Files** and **Tasks**
 manage board storage and processes: dual-pane transfer with push/pull/rm/chmod/mkdir,
 read-only file preview, and a process list with kill options. The **Hardware** tab
 shows a live board inventory (SoC, memory, kernel, display, camera, storage, audio,
-network, NPU) plus a live monitor (CPU load, free RAM, temperature, uptime).
+network, NPU) plus a live monitor (CPU load, free RAM, temperature, uptime). The
+**Edit** and **Examples** tabs make it a board IDE: edit a board C/C++ source file,
+cross-compile it on the host, deploy over ADB and watch the program's output stream
+back live (Build / Deploy + Run / Stop), without leaving the app — and Examples is a
+gallery of ready-to-run templates (hello, screen, audio, camera, LED blink) you load
+into the editor with one click. The ML pipeline (Train / Convert / Deploy & Run) now
+lives under an **ML ▾** menu, with the dev tabs top-level.
 
 Train = PyTorch MPS — classification (MobileNetV2/ResNet18 transfer learning,
 ImageFolder datasets) **and object detection** (`--task detection`: YOLOv2-slim =
@@ -109,7 +115,8 @@ The NPU is single-tenant — stop `kbrun` before running the parity/verify scrip
 | **NPU — your own models** | `kbdk` + `nna_runner` | trained classifier/detector compiled to an NVDLA job, run on the NPU from userspace (no kernel driver); 1.9 ms/inf cls, 3 ms/inf det, byte-exact vs host sim |
 | **NPU — raw CNN** | `nna-cifar10`, `nnaprobe` | hand-built CNN on the NPU via `/dev/mem`+`/dev/ion`+`/dev/cedar_dev` (GPLv3 `third_party/v831-npu`); `nnaprobe` = read-only bring-up probe |
 | **CNN inference (CPU/AWNN)** | `nncls`, `nnacam` | board's `libmaix_nn.so` (quantized-ncnn fork); `nnacam` = live camera → ImageNet ResNet-18 label on the LCD (~80 ms/inf, runs on CPU as this kernel lacks the NPU driver) |
-| GPIO / I²C / SPI / buttons | — | UAPI headers present; not yet written |
+| **GPIO (LED)** | `ledblink` | blink an LED via the raw `/dev/gpiochip` `GPIO_V2` chardev ioctl (auto v1 fallback for the 4.9 kernel). LED pin unconfirmed on this unit — no discrete GPIO LED in the device tree; ships safe placeholder defaults + a `[chip] [line]` sweep (see `docs/research/2026-06-21-led-gpio-investigation.md`) |
+| I²C / SPI / buttons | — | UAPI headers present; not yet written (buttons are analog via `sunxi-gpadc0`, not GPIO) |
 
 ## Board facts
 - SoC **Allwinner V831** (`sun8iw19p1`), Cortex-A7 armv7l hard-float NEON/VFPv4,
@@ -129,6 +136,7 @@ kidbright-uai/
 │   ├── hello.c                    # board smoke-test (printf + sqrt → hard-float)
 │   ├── fbtest.c                   # framebuffer probe + test pattern (screen)
 │   ├── audio.c                    # raw-ioctl ALSA: probe / tone / play / rec
+│   ├── ledblink.c                 # GPIO LED blink (raw /dev/gpiochip GPIO_V2 chardev ioctl)
 │   ├── v4l2probe.c  v4l2cap.c     # V4L2 recon (proved standard streaming is unavailable)
 │   ├── camdiag.c    camread.c     # V4L2 buffer-ABI + read() diagnostics
 │   ├── cammpp.c                   # MPP camera capture (one NV21M frame; can dump raw to a file)
@@ -139,7 +147,7 @@ kidbright-uai/
 ├── crates/                        # kbdk Rust workspace
 │   ├── kbdk-core/                 # library: board I/O, pipeline, frame stream
 │   ├── kbdk-cli/                  # the `kbdk` CLI (devices/train/convert/deploy/run/log/stop)
-│   └── kbdk-ui/                   # egui desktop app (Train/Convert/Deploy tabs)
+│   └── kbdk-ui/                   # egui app: ML pipeline + board IDE (Edit/Examples/Files/Tasks/Hardware)
 ├── py/                            # Python workspace (uv)
 │   ├── kbdk-train/                # PyTorch MPS training (classification + detection)
 │   └── kbdk-convert/             # pnnx→ncnn→int8 packer + NVDLA compiler (nvdla_compile)
@@ -149,7 +157,7 @@ kidbright-uai/
 │   └── ncnn/                      # pinned vanilla ncnn build → static board lib + host quantize tools
 ├── third_party/v831-npu/          # GPLv3 userspace NVDLA driver (mtx512) — raw NPU access
 ├── board-models/imagenet-resnet18/ # AWNN pack for the stock vendor ImageNet model
-├── examples/                      # toy dataset + toy detection generators
+├── examples/                      # toy dataset + detection generators; board/ = C templates (Examples tab)
 ├── scripts/                       # nvdla_parity/verify, eval, serial transfer fallback
 ├── captures/nv21.py               # host tool: decode dumped NV21 → PPM + colour stats (stdlib only)
 ├── vendor/eyesee-mpp/sun8iw19p1/  # vendored Allwinner MPP headers (V831 ABI) for the camera
@@ -170,6 +178,7 @@ brew install arm-unknown-linux-musleabihf
 make            # bin/uai (host) + bin/hello + bin/fbtest + bin/audio (board)
 make uai        # just the host serial tool
 make fbtest     # screen test    | make audio  # audio tool
+make ledblink   # GPIO LED blink (board)
 make cammpp     # camera capture | make campreview  # live preview (raw colour)
 make camcc      # colour-corrected live preview
 make clean
@@ -222,6 +231,20 @@ make deploy-audio
 ./bin/uai exec "/tmp/audio probe p"       # show codec capabilities
 ./bin/uai exec "/tmp/audio tone 440 2"    # 2s sine on the speaker
 ./bin/uai exec "/tmp/audio rec /tmp/x.wav 3 && /tmp/audio play /tmp/x.wav"
+```
+
+## GPIO (LED)
+`ledblink.c` blinks an LED via the raw `/dev/gpiochip` chardev ioctl — `GPIO_V2`
+with an automatic v1 (`GPIO_GET_LINEHANDLE`) fallback for the board's 4.9 kernel.
+**Caveat:** the running device tree declares no discrete software-controllable GPIO
+LED (no `gpio-leds` node, empty `/sys/class/leds`), so the program ships safe
+placeholder pin defaults and takes the chip/line as arguments for an on-hardware
+sweep — read `docs/research/2026-06-21-led-gpio-investigation.md` before driving a
+pin (never the camera reset/power-down lines).
+```sh
+make deploy-ledblink
+./bin/uai exec "/tmp/ledblink"                    # placeholder pin (gpiochip1 line 0)
+./bin/uai exec "/tmp/ledblink /dev/gpiochip1 17"  # sweep a candidate line
 ```
 
 ## Camera
