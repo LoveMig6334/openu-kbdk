@@ -41,6 +41,7 @@ pub enum Msg {
     FileOpDone { context: String, refresh_board: Option<String> },
     PreviewLoaded { path: String, body: String, is_binary: bool },
     HwInfo(kbdk_core::hwinfo::HwInfo),
+    HwLive(kbdk_core::hwinfo::LiveStats),
 }
 
 /// One exec per poll tick: last result lines + the KBSTAT health sample
@@ -230,6 +231,19 @@ impl Workers {
     /// Test hook: start only the log poller (board runner already started externally).
     pub fn run_pack_poll_only(&self) {
         self.start_log_poller();
+    }
+
+    pub fn probe_hw_live(&self) {
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let t = AdbTransport::new(None);
+            match kbdk_core::hwinfo::probe_live(&t) {
+                Ok(s) => { let _ = tx.send(Msg::HwLive(s)); }
+                Err(e) => { let _ = tx.send(Msg::OpError { context: "hardware live".into(), message: e.to_string() }); }
+            }
+            ctx.request_repaint();
+        });
     }
 
     pub fn probe_hw(&self) {

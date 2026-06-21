@@ -156,6 +156,10 @@ pub struct KbdkApp {
     pub hw_info: Option<kbdk_core::hwinfo::HwInfo>,
     pub hw_probing: bool,
     pub hw_status: String,
+    pub hw_live: Option<kbdk_core::hwinfo::LiveStats>,
+    pub hw_mem_hist: Vec<[f64; 2]>,
+    pub hw_last_live_poll: Option<std::time::Instant>,
+    pub hw_live_inflight: bool,
 }
 
 /// Keep the perf-plot vectors bounded (~8 min of 2 s samples).
@@ -262,6 +266,10 @@ impl KbdkApp {
             hw_info: None,
             hw_probing: false,
             hw_status: String::new(),
+            hw_live: None,
+            hw_mem_hist: vec![],
+            hw_last_live_poll: None,
+            hw_live_inflight: false,
         };
         app.rescan_packs();
 
@@ -465,12 +473,19 @@ impl KbdkApp {
                     self.hw_probing = false;
                     self.hw_status = "updated".into();
                 }
+                Msg::HwLive(s) => {
+                    let t = self.started.elapsed().as_secs_f64();
+                    push_capped(&mut self.hw_mem_hist, [t, s.mem_avail_kb as f64]);
+                    self.hw_live = Some(s);
+                    self.hw_live_inflight = false;
+                }
                 Msg::OpError { context, message } => {
                     let msg = format!("{context}: {message}");
                     self.tasks_status = msg.clone();
                     self.files.status = msg.clone();
                     self.hw_status = msg;
                     self.hw_probing = false;
+                    self.hw_live_inflight = false;
                 }
                 Msg::DirListed { path, entries } => {
                     self.files.board.children.insert(path, entries);
