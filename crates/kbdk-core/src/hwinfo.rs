@@ -56,8 +56,8 @@ pub const STATIC_PROBE_CMD: &str = concat!(
     r#"echo 'SECTION Network'; "#,
     r#"printf 'interfaces\t%s\n' "$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"; "#,
     r#"echo 'SECTION NPU'; "#,
-    r#"printf 'nna node\t%s\n' "$(n=$(ls -d /proc/device-tree/*nna* 2>/dev/null | tr '\n' ' '); echo ${n:-na})"; "#,
-    r#"printf 'status\t%s\n' "$(s=$(cat /proc/device-tree/*nna*/status 2>/dev/null | tr -d '\0'); echo ${s:-na})"; "#,
+    r#"printf 'nna node\t%s\n' "$(n=$(ls -d /proc/device-tree/*/nna@* /proc/device-tree/nna@* 2>/dev/null | sed 's#.*/##' | tr '\n' ' '); echo ${n:-na})"; "#,
+    r#"printf 'status\t%s\n' "$(s=$(cat /proc/device-tree/*/nna@*/status 2>/dev/null | tr -d '\0'); echo ${s:-na})"; "#,
     "true",
 );
 
