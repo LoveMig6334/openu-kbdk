@@ -1,7 +1,7 @@
 //! Top-level app: tab routing, device badge, channel pumping, persistence.
 
 use crate::workers::{Msg, Workers};
-use crate::{convert_tab, deploy_tab, files_tab, tasks_tab, theme, train_tab};
+use crate::{convert_tab, deploy_tab, files_tab, hardware_tab, tasks_tab, theme, train_tab};
 use eframe::egui;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -12,6 +12,7 @@ pub enum Tab {
     Deploy,
     Files,
     Tasks,
+    Hardware,
 }
 
 fn default_task() -> String {
@@ -520,6 +521,7 @@ impl KbdkApp {
             ui.selectable_value(&mut self.f.tab, Tab::Deploy, "Deploy & Run");
             ui.selectable_value(&mut self.f.tab, Tab::Files, "Files");
             ui.selectable_value(&mut self.f.tab, Tab::Tasks, "Tasks");
+            ui.selectable_value(&mut self.f.tab, Tab::Hardware, "Hardware");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self.adb_devices.is_empty() && self.serial_ports.is_empty() {
@@ -562,6 +564,7 @@ impl eframe::App for KbdkApp {
                 Tab::Deploy => deploy_tab::show(self, ui),
                 Tab::Files => files_tab::show(self, ui),
                 Tab::Tasks => tasks_tab::show(self, ui),
+                Tab::Hardware => hardware_tab::show(self, ui),
             });
     }
 }
