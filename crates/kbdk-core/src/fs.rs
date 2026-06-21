@@ -95,10 +95,10 @@ pub fn list_dir(t: &dyn Transport, path: &str) -> Result<Vec<DirEntry>> {
 pub fn read_head(t: &dyn Transport, path: &str, max_bytes: usize, local: &Path) -> Result<Vec<u8>> {
     let tmp = "/tmp/kbdk_preview.bin";
     let r = t.exec(
-        &format!("head -c {max_bytes} {} > {tmp} 2>/dev/null; echo rc=$?", q(path)),
+        &format!("head -c {max_bytes} {} > {tmp} 2>/dev/null && echo KBDK_OK", q(path)),
         15,
     )?;
-    if !r.output.contains("rc=0") {
+    if !r.output.contains("KBDK_OK") {
         bail!("read {path}: {}", r.output.trim());
     }
     t.pull(tmp, local)?;
@@ -175,6 +175,10 @@ lrwxrwxrwx    1 root     root             7 Jun 10 12:00 sh -> busybox
         assert!(looks_binary(&[0u8, 1, 2, 3]));
         assert!(!looks_binary(b"hello\nworld\n"));
         assert!(!looks_binary(b"")); // empty = treat as text
+        // control-char ratio branch (no NUL): >30% control bytes = binary
+        assert!(looks_binary(b"\x01\x02\x03\x04\x05"));
+        // mostly-text with one control byte stays text
+        assert!(!looks_binary(b"normal text line\x01\n"));
     }
 
     #[test]
