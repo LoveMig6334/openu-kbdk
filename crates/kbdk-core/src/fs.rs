@@ -14,11 +14,32 @@ pub struct DirEntry {
     pub mode: String,
 }
 
+/// Strip ANSI SGR escape sequences (`ESC [ … m`) — some busybox `ls` builds
+/// colorize names by default, which would otherwise land inside DirEntry.name.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // consume up to and including the final 'm' of the escape
+            for e in chars.by_ref() {
+                if e == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Parse busybox `ls -la` output. Drops the `total` line and `.`/`..`.
 /// Defensive: lines that don't look like a long listing are skipped.
 pub fn parse_ls(out: &str) -> Vec<DirEntry> {
     let mut v = Vec::new();
-    for line in out.lines() {
+    for raw in out.lines() {
+        let line = strip_ansi(raw);
         let cols: Vec<&str> = line.split_whitespace().collect();
         // perms links owner group size mon day time name...  => >= 9 cols
         if cols.len() < 9 || cols[0] == "total" {
@@ -167,6 +188,21 @@ lrwxrwxrwx    1 root     root             7 Jun 10 12:00 sh -> busybox
     fn parse_ls_tolerates_junk() {
         assert!(parse_ls("").is_empty());
         assert!(parse_ls("ls: /nope: No such file or directory").is_empty());
+    }
+
+    #[test]
+    fn parse_ls_strips_ansi_color() {
+        // some busybox `ls` builds colorize names: ESC[1;34m<name>ESC[0m
+        let colored = "drwxr-xr-x    2 root root 4096 Jun 10 12:00 \u{1b}[1;34mkbdk\u{1b}[0m\n\
+                       -rw-r--r--    1 root root   12 Jun 10 12:00 \u{1b}[0mnotes.txt\u{1b}[0m";
+        let v = parse_ls(colored);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].name, "kbdk");
+        assert!(v[0].is_dir);
+        assert_eq!(v[1].name, "notes.txt");
+        assert_eq!(v[1].size, 12);
+        // strip_ansi leaves plain text untouched
+        assert_eq!(strip_ansi("plain"), "plain");
     }
 
     #[test]
