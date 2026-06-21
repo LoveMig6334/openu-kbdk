@@ -44,7 +44,9 @@ runtime), shows a **board performance monitor** (CPU/RAM/RSS, inference
 latency, camera-fps vs infers/s), lists **all classes** with live softmax in a
 scroll area, and can **capture frames from the board camera into ImageFolder
 datasets** (single shot or burst) — point the camera at your objects, collect a
-dataset, train, deploy, all without leaving the app.
+dataset, train, deploy, all without leaving the app. The **Files** and **Tasks** tabs
+manage board storage and processes: dual-pane transfer with push/pull/rm/chmod/mkdir,
+read-only file preview, and a process list with kill options.
 
 Train = PyTorch MPS — classification (MobileNetV2/ResNet18 transfer learning,
 ImageFolder datasets) **and object detection** (`--task detection`: YOLOv2-slim =

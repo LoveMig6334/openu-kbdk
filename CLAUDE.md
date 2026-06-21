@@ -116,7 +116,13 @@ long-delay screenshots (seen live; not a bug). egui 0.34 gotchas already
 handled: `App::ui` + `Panel::*::show_inside` (not `update`/`show`), egui_plot 0.35
 pairs with egui 0.34, persistence needs the eframe `persistence` feature, and
 `TextEdit` inside `Grid` collapses to minimum width (use horizontal rows +
-`add_sized` labels instead — see convert_tab.rs).
+`add_sized` labels instead — see convert_tab.rs). The UI also has **Files** and **Tasks** tabs: Files is a dual-pane local↔board
+transfer manager (lazy `ls -la` per board dir, push/pull via the md5-verified
+Transport, rm/chmod/mkdir with confirms, read-only text/hex preview via a
+bounded `head -c`+pull); Tasks lists board processes from `/proc` (RSS-sorted)
+with SIGTERM/SIGKILL. Both run all board I/O on worker threads and refresh
+manually (no background poll — the single A7 competes with kbrun). Helpers live
+in `kbdk-core::{fs,procs}` with hardware-free parser unit tests.
 
 Hard-won facts baked into kbdk (don't re-learn these):
 - **AWNN can't run vanilla ncnn**: `libmaix_nn.so` loads a vanilla .param/.bin without
