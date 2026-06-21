@@ -46,7 +46,9 @@ scroll area, and can **capture frames from the board camera into ImageFolder
 datasets** (single shot or burst) — point the camera at your objects, collect a
 dataset, train, deploy, all without leaving the app. The **Files** and **Tasks** tabs
 manage board storage and processes: dual-pane transfer with push/pull/rm/chmod/mkdir,
-read-only file preview, and a process list with kill options.
+read-only file preview, and a process list with kill options. The **Hardware** tab
+shows a live board inventory (SoC, memory, kernel, display, camera, storage, audio,
+network, NPU) plus a live monitor (CPU load, free RAM, temperature, uptime).
 
 Train = PyTorch MPS — classification (MobileNetV2/ResNet18 transfer learning,
 ImageFolder datasets) **and object detection** (`--task detection`: YOLOv2-slim =
